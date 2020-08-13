@@ -1,0 +1,21 @@
+);
+        users.fullName = tfFullName.getText();
+        users.emailAddress = tfEmail.getText();
+        users.contactNumber = tfPhone.getText();
+        users.salary = tfSalary.getText();
+        users.address = taAddress.getText();
+        users.password = tfPassword.getText();
+        users.imagePath = imagePath;
+        users.creatorId = usrId;
+        usersGetway.save(users);
+        basicPermission();
+    }
+
+    
+    private void basicPermission(){
+        DBConnection dbCon = new DBConnection();
+        Connection con;
+        ResultSet rs;
+        PreparedStatement pst;
+        con = dbCon.geConnection();
+      
