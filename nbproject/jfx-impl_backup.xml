@@ -1,0 +1,3588 @@
+    // IE does not support DTLite
+        if (ua.deploy != null && !ua.ie) {
+            return versionCheck("10.6+", ua.deploy, false);
+        }
+        return false;
+    }
+
+    function isDTLiteInitialized(p) {
+        //if plugin is blocked then p.version will be undefined
+        return p != null && isDef(p.version);
+    }
+
+    function getDTLitePlugin() {
+        return document.getElementById("dtlite");
+    }
+
+    function doInjectDTLite() {
+        //do not want more than one plugin
+        if (getDTLitePlugin() != null) return;
+
+        var p = document.createElement('embed');
+        p.width = '10px';
+        p.height = '10px';
+        p.id = "dtlite";
+        p.type = "application/x-java-applet";  //means we get latest
+
+        var div = document.createElement("div");
+        div.style.position = "relative";
+        div.style.left = "-10000px";
+        div.appendChild(p);
+
+        var e = document.getElementsByTagName("body");
+        e[0].appendChild(div);
+    }
+
+    function runUsingDTLite(f) {
+        //  Possible situations:
+        //   a) first request, plugin is not in the DOM tree yet
+        //        - add plugin
+        //        - setup wait mechanism and run f() once plugin is ready
+        //   b) plugin is live and we can simply run code
+        //        - just run the code
+        //   c) plugin is in the DOM tree but it is not initialized yet (e.g. Chrome blocking)
+        //      and there is live timer (pendingCount > 0)
+        //        - there could be another request. We will override it (e.g. user clicked multiple times)
+        //        - renew timer life counter (do not want new timer)
+        //   d) plugin is in the DOM tree and it is not fully initialized yet but timer is stopped
+        //        - overwrite old request
+        //        - restart timer
+        //
+        // Problem:
+        //    when plugin is ready to serve request? How do we schedule call to happen when plugin is initialized?
+        // Caveat:
+        //    Chrome can popup dialog asking user to grant permissions to load the plugin.
+        //    There is no API to detect dialog is shown and when user grants or declines permissions
+        //
+        // Note:
+        //    If we set property on plugin object before it is unblocked then they seem to be lost
+        //   and are not propagated to the final object once it is instantiated.
+        //
+        // Workaround we use:
+        //    Once plugin is added we will be checking if it is initialized and once we detect it we will execute code.
+        //  We will stop checking after some time.
+        var p = getDTLitePlugin();
+        if (p == null) {
+            doInjectDTLite();
+            p = getDTLitePlugin();
+        }
+
+        if (isDTLiteInitialized(p)) {
+            f(p);
+        } else {
+            // see if we need new timer
+            var waitAndUse = null;
+            if (!isDef(dtjava.dtlitePendingCnt) || dtjava.dtlitePendingCnt == 0) {
+                waitAndUse = function () {
+                    if (isDef(p.version)) {
+                        if (dtjava.pendingLaunch != null) {
+                            dtjava.pendingLaunch(p);
+                        }
+                        dtjava.pendingLaunch = null;
+                        return;
+                    }
+                    if (dtjava.dtlitePendingCnt > 0) {
+                        dtjava.dtlitePendingCnt--;
+                        setTimeout(waitAndUse, 500);
+                    }
+                }
+            }
+            //add new task in queue
+            dtjava.pendingLaunch = f;
+            //reset the timer counter
+            dtjava.dtlitePendingCnt = 1000; //timer is gone after 500s
+            //start timer if needed
+            if (waitAndUse != null) {
+                waitAndUse();
+            }
+        }
+    }
+
+    function doLaunchUsingDTLite(app, jvmargs, cb) {
+        var launchIt = function() {
+            var pp = getDTLitePlugin();
+            if (pp == null) {
+                //should not be possible as we guard before enter this function
+                if (isDef(cb.onRuntimeError)) {
+                    cb.onRuntimeError(app.id);
+                }
+            }
+
+            //DTLite only support new invocation API
+            //    obj.launchApp({"url" : "http://somewhere/my.jnlp",
+            //                   "jnlp_content" : "... BASE 64 ...",
+            //                   "vmargs" : [ "-ea -Djnlp.foo=bar"
+            //                   "appargs" : [ "first arg,  second arg" ]
+            //                   "params" : {"p1" : "aaa", "p2" : "bbb"}});
+            var callArgs = {"url" : app.url};
+            if (notNull(jvmargs)) {
+               callArgs["vmargs"] = jvmargs;
+            }
+            //Only use HTML parameters, they are supposed to overwrite values in the JNLP
+            //In the future we want to pass arguments too but this needs also be exposed for
+            // embedded deployment
+            if (notNull(app.params)) {
+                //copy over and ensure all values are stings
+                // (native code will ignore them otherwise)
+                var ptmp = {};
+                for (var k in app.params) {
+                    ptmp[k] = String(app.params[k]);
+                }
+                callArgs["params"] = ptmp;
+            }
+            if (notNull(app.jnlp_content)) {
+               callArgs["jnlp_content"] = app.jnlp_content;
+            }
+            var err = pp.launchApp(callArgs);
+            if (err == 0) { //0 - error
+                if (isDef(cb.onRuntimeError)) {
+                    cb.onRuntimeError(app.id);
+                }
+            }
+        };
+
+        if (versionCheck("10.4+", ua.deploy, false)) { //only for NPAPI browsers
+            runUsingDTLite(launchIt);
+            return true;
+        }
+        return false;
+    }
+
+    function getWebstartObject(jnlp) {
+        var wo = null;
+        if (ua.ie) { //TODO: attempt to use object in FF 3.6 lead to hang. Revert to embed for now
+                     //TODO: Should Chrome use object?
+            //object tag itself
+            wo = d.createElement('object');
+            wo.width = '1px'; //zero size reports invalid argument in IE!
+            wo.height = '1px'; //TODO: make it less distruptive to page layout? hide div?
+            var p = d.createElement('param');
+            p.name = 'launchjnlp';
+            p.value = jnlp;
+            wo.appendChild(p);
+            p = d.createElement('param');
+            p.name = 'docbase';
+            p.value = notNull(d.documentURI) ? d.documentURI : d.URL;
+            wo.appendChild(p);
+
+            if (!ua.ie) {
+                //NB:do not need to use exact version in mime type as generic should be mapped to latest?
+                wo.type = "application/x-java-applet;version=1.7";
+            } else {
+                wo.classid = "clsid:8AD9C840-044E-11D1-B3E9-00805F499D93";
+            }
+        } else { //TODO: else part should go away once we figure out what is going on with FF
+            wo = d.createElement('embed');
+            wo.width = '0px';
+            wo.height = '0px';
+            //NB: dot notation did not work for custom attributes??? revert to setAttribute
+            wo.setAttribute('launchjnlp', jnlp);
+            wo.setAttribute('docbase', (notNull(d.documentURI) ? d.documentURI : d.URL));
+            //NB:do not need to use exact version in mime type as generic should be mapped to latest?
+            wo.type = "application/x-java-applet;version=1.7";
+        }
+
+        var div = d.createElement("div");
+        div.style.position = "relative";
+        div.style.left = "-10000px";
+        div.appendChild(wo);
+        return div;
+    }
+
+    // Version class. The argument VersionString is a valid version string and
+    // UpgradeFromOldJavaVersion is optional true/false.
+    var Match = {
+        Exact: {value: 0},  // exact version
+        Family: {value: 1}, // Example: 1.7* only matches 1.7.X family
+        Above: {value: 2}   // Example: 1.7+ matches 1.7 and above
+    };
+
+    var Token = {
+        Uninitialized: {value: -2},
+        Unknown: {value: -1},
+        Identifier: {value: 0},
+        Alpha: {value: 1},
+        Digits: {value: 2},
+        Plus: {value: 3},
+        Minus: {value: 4},
+        Underbar: {value: 5},
+        Star: {value: 6},
+        Dot: {value: 7},
+        End: {value: 8}
+    };
+
+    var Version = function(VersionString, UpgradeFromOldJavaVersion) {
+        if (typeof UpgradeFromOldJavaVersion === 'undefined') {
+            var UpgradeFromOldJavaVersion = true;
+        }
+
+        // Constants
+        var MAX_DIGITS = 4;
+
+        // Private
+        var FVersionString = null;
+        var FOld = false;
+        var FVersion = null;
+        var FBuild = null;
+        var FPre = null;
+        var FMatch = null;
+        var FMajor = null;
+        var FMinor = null;
+        var FSecurity = null;
+        var FPatch = null;
+
+        // Class constructor
+        if (!VersionString) {
+            return null;
+        }
+        else {
+            FVersionString = VersionString;
+            var v = parseAndSplitVersionString(VersionString, UpgradeFromOldJavaVersion)
+            FOld = v.old;
+            FVersion = v.version;
+            FBuild = v.build;
+            FMatch = v.match;
+            FPre = v.pre;
+
+            var parts = splitVersion(v.version);
+            FMajor = parts.major;
+            FMinor = parts.minor;
+            FSecurity = parts.security;
+            FPatch = parts.patch;
+        }
+
+        // Public
+        return {
+            VersionString: VersionString,
+            old: FOld,
+            major: FMajor,
+            minor: FMinor,
+            security: FSecurity,
+            patch: FPatch,
+            version: FVersion,
+            build: FBuild,
+            pre: FPre,
+            match: FMatch,
+
+            check: function(query) {
+                return check(query, this);
+            },
+
+            equals: function(query) {
+                return equals(query, this);
+            }
+        };
+
+        // Private
+        function splitVersion(version) {
+            var lmajor = null;
+            var lminor = null;
+            var lsecurity = null;
+            var lpatch = null;
+
+            if (version.length >= 1) {
+                lmajor = version[0];
+            }
+
+            if (version.length >= 2) {
+                lminor = version[1];
+            }
+
+            if (version.length >= 3) {
+                lsecurity = version[2];
+            }
+
+            if (version.length >= 4) {
+                lpatch = version[3];
+            }
+
+            return {
+                major: lmajor,
+                minor: lminor,
+                security: lsecurity,
+                patch: lpatch
+          };
+        }
+
+        function VersionStringTokenizer(versionString) {
+            // Convert the version string to lower case and strip all whitespace
+            // from the beginning and end of the string.
+
+            var FVersionString = versionString.toLowerCase().trim();
+            var FIndex;
+            var FCurrentToken = null;
+            var FStack = Array();
+
+            function isDigit(c) {
+                var result = false;
+
+                switch(c) {
+                    case '0':
+                    case '1':
+                    case '2':
+                    case '3':
+                    case '4':
+                    case '5':
+                    case '6':
+                    case '7':
+                    case '8':
+                    case '9':
+                        result = true;
+                        break;
+                }
+
+                return result;
+            }
+
+            function isLetter(c) {
+                //return c.match("^[a-zA-Z]");
+                var result = false;
+                var lowerBoundLower = "a".charCodeAt(0);
+                var upperBoundLower = "z".charCodeAt(0);
+                var bound = c.charCodeAt(0);
+
+                if (lowerBoundLower <= bound && bound <= upperBoundLower) {
+                    result = true;
+                }
+
+                return result;
+            }
+
+            function start() {
+                FIndex = 0;
+            }
+
+            function currentToken() {
+                return FCurrentToken;
+            }
+
+            function pushToken(Token) {
+                if (FCurrentToken != null) {
+                    FStack.unshift(FCurrentToken);
+                }
+
+                FCurrentToken = Token;
+            }
+
+            function nextToken() {
+                var tokenID = Token.Uninitialized;
+                var token = '';
+
+                if (FStack.length > 0) {
+                    tokenID = FStack[0].tokenID;
+                    token = FStack[0].token;
+                    FStack.shift();
+                }
+                else {
+                    if (FIndex >= FVersionString.length) {
+                        tokenID = Token.End;
+                    }
+                    else {
+                        while (FIndex < FVersionString.length) {
+                            var c = FVersionString.charAt(FIndex);
+
+                            if ((tokenID == Token.Uninitialized || tokenID == Token.Alpha) &&
+                                isLetter(c) == true) {
+                                tokenID = Token.Alpha;
+                                FIndex++;
+                                token += c;
+                            }
+                            else if ((tokenID == Token.Uninitialized || tokenID == Token.Digits) &&
+                                     isDigit(c) == true) {
+                                if (parseInt(c) == 0 && parseInt(token) == 0) {
+                                    tokenID = Token.Unknown;
+                                    token += c;
+                                    FIndex++;
+                                    break;
+                                }
+                                else {
+                                    tokenID = Token.Digits;
+                                    token += c;
+                                    FIndex++;
+                                }
+                            }
+                            else if ((tokenID == Token.Alpha || tokenID == Token.Identifier) &&
+                                     isDigit(c) == true &&
+                                     isLetter(c) == false) {
+                                tokenID = Token.Identifier;
+                                FIndex++;
+                                token += c;
+                            }
+                            else if (tokenID == Token.Uninitialized) {
+                                switch(c) {
+                                    case '-':
+                                      tokenID = Token.Minus;
+                                      FIndex++;
+                                      token = c;
+                                      break;
+                                    case '+':
+                                      tokenID = Token.Plus;
+                                      FIndex++;
+                                      token = c;
+                                      break;
+                                    case '*':
+                                      tokenID = Token.Star;
+                                      FIndex++;
+                                      token = c;
+                                      break;
+                                    case '.':
+                                      tokenID = Token.Dot;
+                                      FIndex++;
+                                      token = c;
+                                      break;
+                                    case '_':
+                                      tokenID = Token.Underbar;
+                                      FIndex++;
+                                      token = c;
+                                      break;
+                                    default:
+                                        tokenID = Token.Unknown;
+                                        FIndex++;
+                                        break;
+                                }
+
+                                break;
+                            }
+                            else {
+                              break;
+                            }
+                        }
+                    }
+                }
+
+                FCurrentToken = {
+                    token: token,
+                    tokenID: tokenID
+                }
+
+                return FCurrentToken;
+            }
+
+            return {
+                start: start,
+                nextToken: nextToken,
+                pushToken: pushToken,
+                currentToken: currentToken,
+                isDigit: isDigit,
+                isLetter: isLetter
+            }
+        }
+
+        function VersionStringParser() {
+            function readDigits(Tokenizer) {
+                var result = new Array();
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Digits) {
+                    result.push(parseInt(token.token));
+                    token = Tokenizer.nextToken();
+
+                    // Read up to 3 more digits.
+                    for (var index = 0; index < (MAX_DIGITS - 1); index++) {
+                        if (token.tokenID == Token.Dot) {
+                            token = Tokenizer.nextToken();
+
+                            if (token.tokenID == Token.Digits) {
+                                result.push(parseInt(token.token));
+                                token = Tokenizer.nextToken();
+                            }
+                            else if (token.tokenID == Token.Star ||
+                                     token.tokenID == Token.Plus) {
+                                break;
+                            }
+                            else {
+                                result = null;
+                                break;
+                            }
+                        }
+                        else if (token.tokenID == Token.Star ||
+                                 token.tokenID == Token.Plus ||
+                                 token.tokenID == Token.End ||
+                                 token.tokenID == Token.Minus ||
+                                 token.tokenID == Token.Underbar ||
+                                 token.tokenID == Token.Identifier ||
+                                 (token.tokenID == Token.Alpha && token.token == 'u')) {
+                            break;
+                        }
+                        else {
+                            result = null;
+                            break;
+                        }
+                    }
+                }
+
+                return result;
+            }
+
+            function readMatch(Tokenizer, Old) {
+                var result = Match.Exact;
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Dot) {
+                    token = Tokenizer.nextToken();
+
+                    if (token.tokenID == Token.Star) {
+                        result = Match.Family;
+                        Tokenizer.nextToken();
+                    }
+                    else if (token.tokenID == Token.Plus) {
+                        result = Match.Above;
+                        Tokenizer.nextToken();
+                    }
+                }
+                else if (token.tokenID == Token.Star) {
+                    result = Match.Family;
+                    Tokenizer.nextToken();
+                }
+                else if (token.tokenID == Token.Plus) {
+                    result = Match.Above;
+                    Tokenizer.nextToken();
+                }
+
+                return result;
+            }
+
+            function readPre(Tokenizer) {
+                var result = null;
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Minus) {
+                    var savedToken = token;
+                    var token = Tokenizer.nextToken();
+
+                    if (token.tokenID == Token.Alpha) {
+                        result = token.token;
+                        Tokenizer.nextToken();
+                    }
+                    else {
+                        Tokenizer.pushToken(savedToken);
+                    }
+                }
+
+                return result;
+            }
+
+            function readBuild(Tokenizer, Old) {
+                var result = null;
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Plus) {
+                    // The new version spec has build number prepended with a "+":
+                    // RegEx: +([1-9][0-9]*)
+                    var savedToken = token;
+                    var token = Tokenizer.nextToken();
+
+                    if (token.tokenID == Token.Digits) {
+                        result = parseInt(token.token);
+                        Tokenizer.nextToken();
+                    }
+                    else {
+                        Tokenizer.pushToken(savedToken);
+                    }
+                }
+                else if (Old == true) {
+                    // The old version spec has build number prepended with a "-b"
+                    // RegEx: -b([1-9][0-9]*)
+                    if (token.tokenID == Token.Minus || token.tokenID == Token.Underbar) {
+                        var savedToken = token;
+                        token = Tokenizer.nextToken();
+
+                        if (token.tokenID == Token.Identifier && token.token[0] == 'b') {
+                            var builderNumber = parseInt(token.token.substr(1));
+
+                            if (builderNumber != null && isNaN(builderNumber) == false) {
+                                Tokenizer.nextToken();
+                                result = builderNumber;
+                            }
+                        }
+                        else {
+                            Tokenizer.pushToken(savedToken);
+                        }
+                    }
+                }
+
+                return result;
+            }
+
+            // isOldUpdate determines if the version string is in the old
+            // short format. For Example: 8u60
+            function isOldUpdate(version, token) {
+                var result = false;
+
+                if (version.length == 1 &&
+                    parseInt(version[0]) <= 8 &&
+                    token.tokenID == Token.Identifier &&
+                    token.token.length > 0 &&
+                    token.token.charAt(0) == "u") {
+                    result = true;
+                }
+
+                return result;
+            }
+
+            // Only call this function if isOldUpdate() returns true.
+            function readOldUpdate(Tokenizer) {
+                var result = null;
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Identifier) {
+                    result = parseInt(token.token.substr(1));
+                    Tokenizer.nextToken();
+                }
+                else if (token.tokenID == Token.Star) {
+                    lmatch = Match.Family;
+                    Tokenizer.nextToken();
+                }
+                else if (token.tokenID == Token.Plus) {
+                    lmatch = Match.Above;
+                    Tokenizer.nextToken();
+                }
+
+                return result;
+            }
+
+            function readOpt(Tokenizer) {
+                var result = null;
+                var token = Tokenizer.currentToken();
+
+                if (token.tokenID == Token.Alpha) {
+                    result = token.token;
+                    Tokenizer.nextToken();
+                }
+
+                return result;
+            }
+
+            function parse(Tokenizer) {
+                var result = null;
+                var success = false;
+
+                var lold = false;
+                var lversion = null;
+                var lbuild = null;
+                var lmatch = Match.Exact;
+                var lpre = false;
+                var lopt = null;
+
+                Tokenizer.start();
+                var token = Tokenizer.nextToken();
+
+                if (token.tokenID == Token.Digits) {
+                    lversion = readDigits(Tokenizer);
+
+                    if (lversion != null && lversion.length > 0) {
+                        token = Tokenizer.currentToken();
+
+                        if (lversion[0] == 1) {
+                            if (lversion.length >= 2 && lversion[1] == 9) {
+                                return null;
+                            }
+
+                            lold = true;
+                        }
+                        else if (token.token == "u") {
+                            // Special case. For Example: 8u*
+                            token = Tokenizer.nextToken();
+                        }
+
+                        if (isOldUpdate(lversion, token) == true) {
+                            lold = true;
+                            var value = readOldUpdate(Tokenizer);
+
+                            if (value != null) {
+                                token = Tokenizer.currentToken();
+                                lversion.push(parseInt(value));
+                                lold = true;
+
+                                if (token.tokenID == Token.End) {
+                                    success = true;
+                                }
+                                else {
+                                    lmatch = readMatch(Tokenizer);
+                                    token = Tokenizer.currentToken();
+
+                                    if (token.tokenID == Token.End) {
+                                        success = true;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            token = Tokenizer.currentToken();
+
+                            if (lold == true && token.tokenID == Token.Underbar) {
+                                token = Tokenizer.nextToken();
+
+                                if (token.tokenID == Token.Digits && lversion.length < MAX_DIGITS) {
+                                    lversion.push(parseInt(token.token));
+                                    Tokenizer.nextToken();
+                                }
+                            }
+
+                            lpre = readPre(Tokenizer);
+                            token = Tokenizer.currentToken();
+
+                            lbuild = readBuild(Tokenizer, lold);
+                            lopt = readOpt(Tokenizer);
+                            lmatch = readMatch(Tokenizer, lold);
+                            token = Tokenizer.currentToken();
+
+                            if (token.tokenID == Token.End) {
+                                success = true;
+                            }
+                        }
+
+                        if (success == true) {
+                            result = {
+                                old: lold,
+                                version: lversion,
+                                build: lbuild,
+                                match: lmatch,
+                                pre: lpre,
+                                opt: lopt
+                            };
+                        }
+                    }
+                }
+
+                return result;
+            }
+
+            return {
+                parse: parse
+            }
+        }
+
+        function parseAndSplitVersionString(versionString, UpgradeFromOldJavaVersion) {
+            var lold = false;
+            var lversion = new Array;
+            var lbuild = null;
+            var lmatch = null;
+            var lpre = false;
+            var lopt = null;
+
+            // Corner case inputs.
+            if (versionString == null || versionString.length == 0) {
+                lversion = [0, 0, 0, 0];
+            }
+            else {
+                var tokenizer = VersionStringTokenizer(versionString);
+                var parser = VersionStringParser();
+                var result = parser.parse(tokenizer);
+
+                if (result != null) {
+                    if (UpgradeFromOldJavaVersion == true &&
+                        result.old == true) {
+                        if (result.version.length > 0 &&
+                            result.version[0] == 1) {
+                            lversion = result.version.splice(1, result.version.length - 1);
+                        }
+                        else {
+                            lversion = result.version;
+                        }
+
+                        lold = true;
+                    }
+                    else {
+                        lversion = result.version;
+                    }
+
+                    lbuild = result.build;
+                    lmatch = result.match;
+                    lpre = result.pre;
+                }
+            }
+
+            return {
+                old: lold,
+                version: lversion,
+                build: lbuild,
+                match: lmatch,
+                pre: lpre,
+                opt: lopt
+            };
+        }
+
+        function sameVersion(query, version) {
+            var result = false;
+            var lquery = query;
+
+            if (lquery == null)
+                lquery = 0;
+
+            if (parseInt(lquery) == parseInt(version)) {
+                result = true;
+            }
+
+            return result;
+        }
+
+        // compareVersionExact comparison returns true only if query and version are
+        // exact matches.
+        function compareVersionExact(query, version) {
+            var result = false;
+
+            if ((query.major != null) &&
+                (version.major != null) &&
+                sameVersion(query.major, version.major) &&
+                sameVersion(query.minor, version.minor) &&
+                sameVersion(query.security, version.security) &&
+                sameVersion(query.patch, version.patch) &&
+                (query.old == version.old) &&
+                (query.pre == version.pre) &&
+                ((parseInt(query.build) == parseInt(version.build)) || (query.build == null && version.build == null))) {
+                result = true;
+            }
+
+            return result;
+        }
+
+        // compareVersionFamily comparison is for the * wild card for the current query
+        // version and anything above within the current version. For Example:
+        // 1.7* will match 1.7.8.9 but not 1.8.
+        function compareVersionFamily(query, version) {
+            var result = false;
+
+            // There is a subtle corner case comparison when comparing:
+            //  1.* to 1.8 (success)
+            //  1.* to 9.0 (fail)
+            // In this case, if both strings are old that means we have a 1s, so
+            // since the query string is all 0s, or empty, we have a match.
+            if (query.old == true && query.version.length == 0 && version.old == true) {
+                result = true;
+            }
+            else {
+                // All elements must match on the query version array.
+                for (index = 0 ;index < query.version.length && index < version.version.length;
+                     index++) {
+                    var q = query.version[index];
+                    var v = version.version[index];
+
+                    if (parseInt(q) == parseInt(v)) {
+                        result = true;
+                    }
+                    else {
+                        result = false;
+                        break;
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // compareVersionAbove comparison is for the + wild card for the current query
+        // version and anything above returning true.
+        function compareVersionAbove(query, version) {
+            var result = false;
+
+            if (query.old == true && query.version.length == 0) {
+                result = true;
+            }
+            else if (query.old == true && version.old == false) {
+                result = true;
+            }
+            else if (query.major == 0) {
+                result = true;
+            }
+            else if ((query.major != null) &&
+                (version.major != null) &&
+                ((parseInt(query.build) == parseInt(version.build)) || (query.build == null && version.build == null))) {
+
+                for (var index = 0; index < query.version.length; index++) {
+                    var q = query.version[index];
+                    var v = version.version[index];
+
+                    if (parseInt(q) == parseInt(v)) {
+                        result = true;
+                    }
+                    else if (parseInt(q) < parseInt(v)) {
+                        if ((query.old == true && version.old == true) ||
+                            (query.old == false && version.old == false)) {
+                            result = true;
+                        }
+
+                        break;
+                    }
+                    else {
+                        result = false;
+                        break;
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // cloneAndCompleteVersionInfo is an internal method. It makes a copy of the
+        // version structure and completes the version array to contain four elements.
+        function cloneAndCompleteVersionInfo(version) {
+            var clone_version = version.version.slice(0);
+
+            // The source version string must be a complete version string (four digits).
+            // Example: 9.0.0.0
+            for (var index = clone_version.length; index < 4 ; index++) {
+                clone_version.push(0);
+            }
+
+            var parts = splitVersion(clone_version);
+
+            return {
+                old: version.old,
+                major: parts.major,
+                minor: parts.minor,
+                security: parts.security,
+                patch: parts.patch,
+                version: clone_version,
+                build: version.build,
+                pre: version.pre
+            };
+        }
+
+        // Check performs a deploy pattern match comparison and returns
+        // true if the comparing version matches false if not.
+        function check(query, version) {
+            var result = false;
+
+            if (query.VersionString == null || query.VersionString.length == 0) {
+                result = true;
+            }
+            else {
+                if (query.build == null && version.build == null) {
+                    var lversion = cloneAndCompleteVersionInfo(version);
+
+                    if (query.match == Match.Exact) {
+                        result = compareVersionExact(query, lversion);
+                    }
+                    else if (query.match == Match.Family) {
+                        result = compareVersionFamily(query, lversion);
+                    }
+                    else if (query.match == Match.Above) {
+                        result = compareVersionAbove(query, lversion);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // Performs a comparison on the two version string arguments and returns
+        // true if the comparing version matches false if not.
+        function equals(value, version) {
+            var result = false;
+
+            if (query.VersionString == null || query.VersionString.length == 0) {
+                result = true;
+            }
+            else {
+                var lversion = cloneAndCompleteVersionInfo(version);
+                var lquery = cloneAndCompleteVersionInfo(query);
+                result = compareVersionExact(lquery, lversion);
+            }
+
+            return result;
+        }
+    };
+
+    // Compares two version strings: query and version, matching query against version. query
+    // is allowed to have wild cards + and * version is not. The argument UpgradeFromOldJavaVersion
+    // is optional. This will remove the 1 prefix if present and mark the old field in the structure
+    // that is passed around.
+    function versionCheck(query, version, UpgradeFromOldJavaVersion) {
+        var q = new Version(query, UpgradeFromOldJavaVersion);
+        var v = new Version(version, UpgradeFromOldJavaVersion);
+        return v.check(q);
+    }
+
+    // This is similar to version check rules except there is a range
+    // over versions (3-7) that are not valid.
+    //
+    // JavaFX version requirements are always treated as "not earlier than this update".
+    // I.e. we expect
+    //     2.2.0 to match 2.2*, 2.2+, 2.1+, 2.1*, 2.0 and 1+
+    //           but not match 2.2.1+, 2.2.1*, 2.3*, 2.3+ or 1*
+    function versionCheckFX(query, version) {
+        var q = new Version(query, false);
+
+        if (parseInt(q.major) >= 3 && parseInt(q.major) <= 7 && query.substr(-1) !== "+") {
+            return false;
+        }
+
+        if (q.match == Match.Exact) {
+            q = new Version(query + "+", false);
+        }
+
+        var v = new Version(version, false);
+
+        return v.check(q);
+    }
+
+    //as JavaFX comes with own plugin binaries then check based on mime types, etc.
+    // may be false positive as it only checks for plugin version, not real JRE
+    //Here we check that DT plugin is aware of JRE installations
+    //Note that:
+    //  - if DT is not available we will return false but we only do this i
+    //    ready to launch => DT must be found
+    //  - we do not want to check in jreCheck() as we want to avoid loading
+    //    DT plugin if we can (as old DT may make it not possible to autostart)
+    function doublecheckJrePresence() {
+        if (!haveDTLite()) { //basically IE on windows or Old JRE on windows
+          if (postponeNativePluginInstallation && notNull(d.body)) {
+              // Native Plugin installation was postponed, as the page didn't have
+              // body at that time. Try to install the plugin now.
+              installNativePlugin();
+              postponeNativePluginInstallation = false;
+          }
+          var p = getPlugin();
+          if (p != null) {
+            return true;
+            //WORKAROUND: bug in native DT!!! TODO: What version? bypass for it only
+            //return (p.jvms.getLength() > 0);
+          }
+
+          return false;
+        }
+
+        //if we are not using native DT plugin (i.e. using DTLite) then no way we can do sanity check
+        //   => assume first check is accurate
+        return true;
+    }
+
+    function jreCheck(jre) {
+        // Check if latest JRE is exposed in mimetype and if it is good enough (only for NPAPI browsers)
+        if (ua.jre != null) {
+            if (versionCheck(jre, ua.jre)) {
+               return "ok";
+            }
+            //Note: if we have JRE but it is not match that means we may need an upgrade message
+            // but we still could be able to get more accurate answer with native DT plugin
+        }
+
+        //try to use DT plugin
+        var p = getPlugin();
+        if (p != null) {
+            var VMs = p.jvms;
+            for (var i = 0; VMs != null && i < VMs.getLength(); i++) {
+                if (versionCheck(jre, VMs.get(i).version)) {
+                    if (!ua.ie && notNull(navigator.mimeTypes)) {
+                        //if mime types are available but plugin is not there =>
+                        //  it is disabled
+                        if (!notNull(navigator.mimeTypes["application/x-java-applet"])) {
+                            return "disabled";
+                        }
+                    }
+                    return "ok";
+                }
+            }
+            //do not need to try other ways if used DT
+            return "none";
+        }
+
+        //No full DT => On Windows we can not launch FX anyways
+        //   but may have old JRE
+        //And we might be able to launch on Mac/Linux
+
+
+        //This is only IE on Windows. This gives no update version. only e.g. 1.6.0
+        //and also cause java plugin to be loaded => browser will need to be restarted
+        //if new JRE is installed.
+        //However, if we got here than DT is not available and autoinstall is not possible
+        if (ua.ie) {
+            var lst = ["1.8.0", "1.7.0", "1.6.0", "1.5.0"];
+            for (var v = 0; v < lst.length; v++) {
+                if (versionCheck(jre, lst[v])) {
+                    try {
+                        //TODO: FIXME: This does not seem to work in my testing in IE7?
+                        var axo = new ActiveXObject("JavaWebStart.isInstalled." + lst[v] + ".0");
+                        // This is not hit if the above throws an exception.
+                        return "ok";
+                    } catch (ignored) {
+                    }
+                }
+            }
+        }
+
+
+        return "none";
+    }
+
+    function checkJRESupport() {
+        //Negative test. New platforms will not be rejected
+        var osProblem = ['iPhone', 'iPod'];
+        var os = containsAny(osProblem, navigator.userAgent);
+
+        //Do not support Chrome/Mac as Chrome is 32 bit only
+        var browser = (ua.mac && ua.chrome && ua.cputype == "intel");
+
+        //autoinstall possible if native plugin is detected or OS is fine
+        auto = os || (getPlugin() != null);
+
+        //false is no problem found
+        return {os: os, browser: browser, auto: auto};
+    }
+
+    //it is not clear if we can work in IE6
+    // but it is hard to test and JRE7 does not even support it
+    // mark as unsupported for now
+    function isUnsupportedVersionOfIE() {
+        if (ua.ie) {
+            try {
+              //these functions are defined in IE only
+              var v = 10*ScriptEngineMajorVersion() + ScriptEngineMinorVersion();
+              if (v < 57) return true; //IE7 will have 57
+            } catch (err) {
+                //really old IE?
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function checkFXSupport() {
+        var browser;
+        if (ua.win) {
+            //do not support Opera and Safari
+            // (not really tested, may be it works but known to have problems with DT detection)
+            browser = ua.op || ua.wk || isUnsupportedVersionOfIE();
+
+            //false is no problem found
+            return {os: false, browser: browser};
+        } else if (ua.mac && ua.cputype == "intel") { //do not support PPC/iphone/ipad ...
+            var os = !versionCheck("10.7.3+", ua.osVersion, false); //10.7.3 or later!
+            browser = ua.op ||
+                (ua.mac && ua.chrome); //Opera is not supported
+            //Chrome on Mac is 32 bit => plugin only work in 64 bit ...
+            //TODO: How do we detect FF running in 32 bit mode?
+
+            //false is no problem found
+            return {os: os, browser: browser};
+        } else if (ua.linux) {
+            browser = ua.op; //Opera unsupported
+
+            //false is no problem found
+            return {os: false, browser: browser};
+        } else {
+            //unknown unsupported OS
+            return {os: true, browser: false};
+        }
+    }
+
+    function relaxVersion(v) {
+        if (notNull(v) && v.length > 0) {
+            var c = v.charAt(v.length - 1);
+            if (c == '*') {
+              v = v.substring(0, v.length - 1)+"+";
+            } else if (c != '+') { //exact version (e.g. 1.6)
+                v = v + "+";
+            }
+        }
+        return v;
+    }
+
+    //we relax validation rules where we try to embed or launch app
+    // in order to deal with requests for OLDER jres at the java level
+    //Basically we convert request for version in JRE family to request for any future JRE
+    //We do NOT do same for JavaFX right now. There is no real need before 3.0 and it is not clear if it is good thing
+    //
+    //Note we keep validation strict for install and validate-only scenarios.
+    // This allows to query accurate details from javascript
+    function doValidateRelaxed(platform) {
+        var p = new dtjava.Platform(platform);
+
+        p.jvm = relaxVersion(p.jvm);
+        //p.javafx = relaxVersion(p.javafx);
+
+        return doValidate(p);
+    }
+
+    function doValidate(platform, noPluginWebBrowser) {
+        //ensure some platform is set (we could get array too!)
+        platform = new dtjava.Platform(platform);
+
+        //problem markers
+        var fx = "ok", jre = "ok", restart = false, os = false, browser = false,
+            p, details;
+
+        //check JRE
+        if (notNull(platform.jvm) && jreCheck(platform.jvm) != "ok") { //matching JRE not found
+            var res = jreCheck("1+");
+            if (res == "ok") {
+                jre = "old";
+            } else {
+                jre = res; //"none" or "disabled"
+            }
+
+            details = checkJRESupport();
+            if (details.os) {
+                jre = "unsupported";
+                os = true;
+            } else if(noPluginWebBrowser) {
+		jre = "ok";
+	    } else {
+                browser = details.browser;
+            }
+        }
+
+        //check FX
+        if (notNull(platform.javafx)) {
+            details = checkFXSupport();
+            if (details.os) { //FX is not supported,
+                              //do not even try
+                fx = "unsupported";
+                os = os || details.os;
+            } else if(noPluginWebBrowser) {
+                fx = "ok";
+	    } else if( details.browser) {
+                browser = browser || details.browser;
+            } else {
+                //on non windows platforms automated install is not possible
+                // (if it is needed on windows and possible we will set it to false later)
+
+                if (ua.fx != null) {
+                  //found cobundled JavaFX on 7u6+ (and it is NPAPI-based browser)
+                  if (versionCheckFX(platform.javafx, ua.fx)) {
+                        fx = "ok";
+                  } else if (versionCheckFX("2.0+", ua.fx)) {
+                        fx = "old";
+                  }
+                } else if (ua.win) { //could be 7u6(cobundle)/IE or JRE6/FX
+                  try {
+                    p = getPlugin();
+                    //typeof did not work in IE
+                    var v = p.getInstalledFXVersion(platform.javafx);
+                    // If not found then try for the latest family (e.g. if the requested FX version is "2.2" and "8.0.5" is installed
+                    // we should not report that FX is old or does not exist. Instead we should continue with "8.0.5" and than either relaunch
+                    // with the requested JRE or offer the user to launch the app using the latest JRE installed).
+                    if (v == "" || v == null) {
+                        v = p.getInstalledFXVersion(platform.javafx + '+');
+                    }
+                    //if found we should get version string, otherwise empty string or null. If found then fx=false!
+                    if (v == "" || v == null) {
+                        v = p.getInstalledFXVersion("2.0+"); //check for any FX version
+                        if (v == null || v == "") {
+                            fx = "none";
+                        } else {
+                            fx = "old";
+                        }
+                    }
+                  } catch(err) {
+                    //If we got here then environment is supported but
+                    //this is non FX aware JRE => no FX and can only offer manual install
+                    // (restart needed as toolkit is already loaded)
+                    fx = "none";
+                  }
+                } else if (ua.mac || ua.linux) {
+                    fx = "none";
+                }
+            }
+        }
+
+        //recommend relaunch if OS is ok but browser is not supported
+        restart = restart || (!os && browser);
+
+        //TODO: need a way to find out if java plugin is loaded => will need to relaunch
+
+        //we need to return null if everything is ok. Check for problems.
+        if (fx != "ok" || jre != "ok" || restart || os || browser) {
+            return new PlatformMismatchEvent(
+                {fx: fx, jre: jre, relaunch: restart, os: os, browser: browser,
+                    platform: platform});
+        } else {
+            //if all looks good check JRE again, it could be false positive
+            if (ua.override == false && !noPluginWebBrowser && !doublecheckJrePresence()) {
+               return new PlatformMismatchEvent(
+                 {fx: fx, jre: "none", relaunch: restart, os: os,
+                     browser: browser, platform: platform});
+            }
+        }
+
+        return null;
+    }
+
+    //TODO: does it make sense to have a way to explicitly request locale?
+    function guessLocale() {
+        var loc = null;
+
+        loc = navigator.userLanguage;
+        if (loc == null)
+            loc = navigator.systemLanguage;
+        if (loc == null)
+            loc = navigator.language;
+
+        if (loc != null) {
+            loc = loc.replace("-", "_")
+        }
+        return loc;
+    }
+
+    function getJreUrl(loc) {
+        if (!notNull(loc)) {
+            loc = guessLocale();
+        }
+        return 'https://java.com/dt-redirect?' +
+            ((notNull(window.location) && notNull(window.location.href)) ?
+                ('&returnPage=' + window.location.href) : '') +
+            (notNull(loc) ? ('&locale=' + loc) : '');
+        //NB: brand parameter is not supported for now
+    }
+
+    function getFxUrl(locale) {
+        return "http://www.oracle.com/technetwork/java/javafx/downloads/index.html";
+    }
+
+    //return true if mismatch event suggest to perform installation
+    function isMissingComponent(v) {
+        if (v != null) {
+            var jre = v.jreStatus();
+            var fx = v.javafxStatus();
+            //if anything is disabled then this need to be resolved before any further installs
+            return (jre == "none" || fx == "none" || jre == "old" || fx == "old")
+               && (fx != "disabled" && jre != "disabled");
+        }
+        return false;
+    }
+
+    function showClickToInstall(ld, isJRE, isUpgrade, isAutoinstall, isRelaunchNeeded, actionFunc) {
+        //what product?
+        var productName, productLabel;
+        if (isJRE) {
+            productName = "Java";
+            productLabel = "java";
+        } else {
+            productName = "JavaFX";
+            productLabel = "javafx";
+        }
+
+        var msg1, msg2, imgName;
+        if (isUpgrade) {
+            msg1 = "A newer version of " + productName + "is required to view the content on this page.";
+            msg2 = "Please click here to update " + productName;
+            imgName = "upgrade_"+productLabel+".png";
+        } else {
+            msg1 = "View the content on this page.";
+            msg2 = "Please click here to install " + productName;
+            imgName = "get_"+productLabel+".png";
+        }
+        var altText = "Click to install "+productName;
+
+        doShowMessageInTheArea(ld, msg1, msg2, altText, imgName, actionFunc);
+    }
+
+    function doShowMessageInTheArea(ld, msg1, msg2, altText, imgName, actionFunc) {
+        //if image will fit (size 238x155)
+        var r = d.createElement("div");
+        r.width = normalizeDimension(ld.width);
+        r.height = normalizeDimension(ld.height);
+
+        var lnk = d.createElement("a");
+        lnk.href="";
+        lnk.onclick = function() {actionFunc(); return false;};
+        if (ld.width < 250 || ld.height < 160) { //if relative size this will fail =>
+                                                 // will choose image
+            r.appendChild(
+               d.createElement("p").appendChild(
+                  d.createTextNode(msg1)));
+            lnk.appendChild(d.createTextNode(msg2));
+            r.appendChild(lnk);
+        } else {
+            var img = d.createElement("img");
+            img.src = jscodebase + imgName;
+            img.alt = altText;
+            img.style.borderWidth="0px";
+            img.style.borderStyle="none";
+//FIXME: centering image does not work (in a way it also work with relative dimensions ...)
+//            lnk.style.top="50%";
+//            lnk.style.left="50%";
+//            lnk.style.marginTop = -119; // 238/2
+//            lnk.style.marginLeft = -77; //155/2
+            lnk.appendChild(img);
+            r.appendChild(lnk);
+        }
+        wipe(ld.placeholder);
+        ld.placeholder.appendChild(r);
+    }
+
+    function canJavaFXCoBundleSatisfy(platform) {
+        // check if latest co-bundle can satisfy
+        if (versionCheck(platform.jvm, minJRECobundleVersion, false) &&
+            versionCheckFX(platform.javafx, "2.2.0")) {
+            return true;
+        }
+        return false;
+    }
+
+    function defaultInstallHandler(app, platform, cb,
+                                   isAutoinstall, needRelaunch, launchFunc) {
+        var installFunc = function() {
+            doInstall(app, platform, cb, launchFunc);
+        };
+
+        var s = doValidate(platform);
+        if (!notNull(s)) { //platform match => nothing to install
+            if (notNull(launchFunc)) {
+                launchFunc();
+            }
+        }
+
+        var isUpgrade = notNull(s) && (s.javafxStatus() == "old" || s.jreStatus() == "old");
+        if (notNull(app.placeholder)) { //embedded
+            if (canJavaFXCoBundleSatisfy(platform)) { //if both JRE and FX are missing we will start install from JRE
+                //it is only JRE that needs to be updated
+               showClickToInstall(app, true, isUpgrade, isAutoinstall, needRelaunch, installFunc);
+            } else {
+               showClickToInstall(app, (s.jreStatus() != "ok"), isUpgrade, isAutoinstall, needRelaunch, installFunc);
+            }
+        } else { //webstart
+          var r = isAutoinstall;
+          var msg = null;
+          if (!r) {
+             if (canJavaFXCoBundleSatisfy(platform)) { //if both JRE and FX are missing we will start install from JRE
+                 //it is only JRE that needs to be updated
+                 if (isUpgrade) {
+                     msg = "A newer version of Java is required to view the content on this page. Please click here to update Java.";
+                 } else {
+                     msg = "To view the content on this page, please click here to install Java.";
+                 }
+                 r = confirm(msg);
+             } else {
+                 if (isUpgrade) {
+                     msg = "A newer version of JavaFX is required to view the content on this page. Please click here to update JavaFX.";
+                 } else {
+                     msg = "To view the content on this page, please click here to install JavaFX.";
+                 }
+                 r = confirm(msg);
+             }
+          }
+          if (r)
+             installFunc();
+        }
+    }
+
+    /**
+     * returns true if we can enable DT plugin auto-install without chance of
+     * deadlock on cert mismatch dialog
+     *
+     * requestedJREVersion param is optional - if null, it will be
+     * treated as installing any JRE version
+     *
+     * DT plugin for 6uX only knows about JRE installer signed by SUN cert.
+     * If it encounter Oracle signed JRE installer, it will have chance of
+     * deadlock when running with IE.  This function is to guard against this.
+     */
+    function enableWithoutCertMisMatchWorkaround(requestedJREVersion) {
+
+       // Non-IE browser are okay
+       if (!ua.ie) return true;
+
+       // if DT plugin is 10.0.0 or above, return true
+       // This is because they are aware of both SUN and Oracle signature and
+       // will not show cert mismatch dialog that might cause deadlock
+       if (versionCheck("10.0.0+", getPlugin().version, false)) {
+          return true;
+       }
+
+       // If we got there, DT plugin is 6uX
+
+       if (requestedJREVersion  == null) {
+          // if requestedJREVersion is not defined - it means ANY.
+          // can not guarantee it is safe to install ANY version because 6uX
+          // DT does not know about Oracle certificates and may deadlock
+          return false;
+       }
+
+       // 6u32 or earlier JRE installer used Sun certificate
+       // 6u33+ uses Oracle's certificate
+       // DT in JRE6 does not know about Oracle certificate => can only
+       // install 6u32 or earlier without risk of deadlock
+       return !versionCheck("1.6.0_33+", requestedJREVersion);
+    }
+
+    // return true if we can auto-install to satisfy the platform requirement
+    // return false otherwise
+    //
+    // We can auto-install if all below is true:
+    //   - windows platform
+    //   - native DT plugin available
+    //   - if JRE install is required, JRE exe is signed by compatible
+    //       certificate
+    //   - if FX install is required, JRE co-bundle can satisfy the
+    //       requirement or DT plugin supports FX auto-install
+    function isAutoInstallEnabled(platform, jre, fx) {
+       // auto-install is windows only
+       if (!ua.win) return false;
+
+       // if no DT plugin, return false
+       // if DT plugin is there but not operational (e.g. blocked)
+       //  then pretend there is no autoinstall
+       var p = getPlugin();
+       if (p == null || !isDef(p.version)) return false;
+
+       if (jre != "ok") {
+           // need JRE install
+           if (!enableWithoutCertMisMatchWorkaround(platform.jvm)) {
+               return false;
+           }
+       }
+
+       if (fx != "ok") {
+            if (!canJavaFXCoBundleSatisfy(platform)) {
+                // no cobundle, check if there is standalone FX auto-install
+                // DT from Java 7 or later should be ok
+                if (!versionCheck("10.0.0+", getPlugin().version, false)) {
+                    return false;
+                }
+            } else {
+                // we are going to install co-bundle JRE - check if we can do
+                // that
+                if (!enableWithoutCertMisMatchWorkaround(minJRECobundleVersion)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    function doInstall(app, platform, cb, postInstallFunc) {
+        var s = doValidate(platform);
+
+        cb = new dtjava.Callbacks(cb);
+
+        if (notNull(s) && s.isUnsupportedPlatform()) {
+            reportPlatformError(app, s, cb);
+            return false; //no install
+        }
+
+        var placeholder = (app != null) ? app.placeholder : null;
+
+        var codes, status;
+        if (isMissingComponent(s)) { //otherwise nothing to install
+            if (s.jre != "ok") {
+                if (isDef(cb.onInstallStarted)) {
+                    cb.onInstallStarted(placeholder, "Java",
+                                        false, getPlugin() != null);
+                }
+                startManualJREInstall();
+            } else { //what it could be??
+              reportPlatformError(app, s, cb);
+            }
+        } else {
+            //nothing to install
+            if (postInstallFunc != null) {
+                postInstallFunc();
+            }
+            return true;
+        }
+        //no install initiated
+        return false;
+    }
+
+    //just open download URL in new window
+    function startManualJREInstall() {
+        w.open(getJreUrl());
+    }
+
+    //just open download URL in new window
+    function startManualFXInstall() {
+        w.open(javafxURL);
+    }
+
+    function defaultGetSplashHandler(ld) {
+        if (ld.placeholder != null) {
+            var _w = ld.width, _h = ld.height;
+            //prepare image
+            //if width and height are relative then comparison with int will be false
+            //  and we will end up using large image. This is on purpose
+            //  as it is unlikely that relative dimensions are used for tiny applet areas
+            var isBig = !(_w < 100 && _h < 100);
+            var iU = isBig ? 'javafx-loading-100x100.gif' : 'javafx-loading-25x25.gif';
+            var iW = isBig ? 80 : 25;
+            var iH = isBig ? 80 : 25;
+
+            var img = d.createElement("img");
+            img.src = jscodebase + iU;
+            img.alt = "";
+            //position in the center of the container
+            img.style.position = "relative";
+            img.style.top = "50%";
+            img.style.left = "50%";
+            img.style.marginTop =  normalizeDimension(-iH/2);
+            img.style.marginLeft = normalizeDimension(-iW/2);
+
+            return img;
+        } else {
+            //webstart or install case
+            //TODO: show some html splash for webstart? how to hide it?
+            return null;
+        }
+    }
+
+    function defaultGetNoPluginMessageHandler(app) {
+        if (app.placeholder != null) {
+            var p = d.createElement("p");
+            p.appendChild(d.createTextNode("FIXME - add real message!"));
+            return p;
+        } //no op if not embedded content
+        return null;
+    }
+
+    //remove all child elements for given node
+    function wipe(c) {
+        while(c.hasChildNodes()) c.removeChild(c.firstChild);
+    }
+
+    function defaultInstallStartedHandler(placeholder, component, isAuto, restartNeeded) {
+        if (placeholder != null) {
+            var code = null;
+            if (isAuto) {
+                code = (component == "JavaFX") ?
+                    "install:inprogress:javafx": "install:inprogress:jre";
+            } else {
+                code = (component == "JavaFX") ?
+                    "install:inprogress:javafx:manual" : "install:inprogress:jre:manual";
+            }
+
+            appletInfoMsg(code);
+        }
+    }
+
+    function defaultInstallFinishedHandler(placeholder, component, status, relaunch) {
+        var t;
+        if (status != "success") {
+            var msg = null;
+            if (component == "javafx") {
+                if (!doublecheckJrePresence()) { //guess if we failed due to no JRE
+                    //need to request to install JRE first
+                    msg = "install:fx:error:nojre";
+                } else {
+                    msg = "install:fx:"+status;
+                }
+            } else { //must be JRE error
+                msg = "install:jre:"+status;
+            }
+            if (placeholder != null) {
+                t = appletErrorMsg(msg, null);
+
+                //Instead of hiding splash and applet we simply clear the container
+                //We are not going to show neither splash nor applet anyways ...
+                wipe(placeholder);
+                placeholder.appendChild(t);
+            } else {
+                w.alert(webstartErrorMsg(msg));
+            }
+        } else { //success
+            if (relaunch) {
+                t = appletInfoMsg("install:fx:restart");
+
+                //Instead of hiding splash and applet we simply clear the container
+                //We are not going to show neither splash nor applet anyways ...
+                wipe(placeholder);
+                placeholder.appendChild(t);
+            }
+        }
+    }
+
+    function defaultDeployErrorHandler(app, r) {
+        if (r == null) {
+            code = "success";
+        } else if (r.isUnsupportedBrowser()) {
+            code = "browser";
+        } else if (r.jreStatus() != "ok") {
+            code = "jre:" + r.jreStatus();
+        } else if (r.javafxStatus() != "ok") {
+            code = "javafx:" + r.javafxStatus();
+        } else if (r.isRelaunchNeeded()) {
+            code = "relaunch";
+        } else {
+            code = "unknown " + r.toString();
+        }
+
+        if (app.placeholder != null) {//embedded app
+            showAppletError(app.id, code, null);
+        } else { //webstart or install case
+            w.alert(webstartErrorMsg(code));
+        }
+    }
+
+    function defaultRuntimeErrorHandler(id) {
+        var el_applet = findAppletDiv(id);
+
+        if (getErrorDiv(id) != null) {
+            showAppletError(id, "launch:fx:generic:embedded",
+                function() {showHideApplet(findAppletDiv(id), false); return false;});
+        } else {
+            w.alert(webstartErrorMsg("launch:fx:generic"));
+        }
+    }
+
+    //TODO: Does availability of object mean initialization is completed (or even started?)
+    //Can we expect that any subsequent call to this object will actually work?
+    //Perhaps it is false alarm
+    function getPlugin() {
+        var result = null;
+
+        if (ua.override == false) {
+            navigator.plugins.refresh(false);
+            result = document.getElementById('dtjavaPlugin');
+        }
+
+        return result;
+    }
+
+    function installNativePlugin() {
+        //already installed?
+        if (getPlugin() != null) return;
+
+        //can not install plugin now as page has no body yet, postpone
+        //NB: use cbDone here to avoid infinite recursion (corner case)
+        if (!notNull(d.body) && !cbDone) {
+            addOnDomReadyInternal(function() {
+                installNativePlugin();
+            });
+            postponeNativePluginInstallation = true;
+            return;
+        }
+
+        var p = null;
+        if (ua.ie) {
+            p = d.createElement('object');
+            //TODO: zero size does not work?? How we can make it less intrusive for layout?
+            p.width  = '1px';
+            p.height = '1px';
+            //new CLSID, one with 0000-0000 had been kill bit
+            p.classid = 'clsid:CAFEEFAC-DEC7-0000-0001-ABCDEFFEDCBA';
+        } else {
+            // Safari and Opera browsers find the plugin but it
+            // doesn't work, so until we can get it to work - don't use it.
+            if (!ua.wk && !ua.op && navigator.mimeTypes != null) {
+                // mime-type of the DeployToolkit plugin object
+                // (do not care about old DT plugin anymore)
+                var mimeType = 'application/java-deployment-toolkit';
+                var newDT = false;
+                for (var i = 0; i < navigator.mimeTypes.length; i++) {
+                    var mt = navigator.mimeTypes[i];
+                    newDT = newDT || ((mt.type == mimeType) && mt.enabledPlugin);
+                }
+                if (newDT) {
+                    p = d.createElement('embed');
+                    p.setAttribute('type', newDT ? mimeType : oldMimeType);
+                    p.setAttribute('hidden', 'true');
+                }
+            }
+        }
+        if (p != null) {
+            p.setAttribute('id', 'dtjavaPlugin');
+            d.body.appendChild(p);
+
+            // Update internal versions from plug-in if needed
+            if (ua.deploy == null && isDef(p.version)) {
+                ua.deploy = p.version;
+            }
+        }
+    }
+
+    var appletCounter = 0;
+
+    function prepareAppletID(ld) {
+        if (notNull(ld.id)) {
+            return ld.id;
+        } else {
+            appletCounter++;
+            return ("dtjava-app-" + appletCounter);
+        }
+    }
+
+    //returns object that represents an applet/object tag
+    function getAppletSnippet(ld, platform, cb) {
+        //we use wrapper div here as changing style on applet tag
+        // cause liveconnect to be initialized and slows down startup
+        var wrapper = d.createElement("div");
+        wrapper.width = normalizeDimension(ld.width);
+        wrapper.height = normalizeDimension(ld.height);
+        wrapper.id = ld.id + "-app";
+        //without this it splash will not work in Chrome
+        wrapper.style.position = "relative";
+
+        var r = d.createElement("applet"); //TODO: use object!
+
+        r.code = "dummy.class";
+        r.id = ld.id;
+        r.width = normalizeDimension(ld.width);
+        r.height = normalizeDimension(ld.height);
+
+        //things added unconditionally
+        var sparams = {"jnlp_href" : ld.url,
+            "java_status_events" : true,
+            "type" : "application/x-java-applet"};
+
+        if (notNull(ld.jnlp_content)) {
+            sparams['jnlp_embedded'] = ld.jnlp_content;
+        }
+        if (notNull(platform.javafx)) {
+            //for swing applications embedding FX we do not want this property as it will
+            // trigger FX toolkit and lead to app failure!
+            if (!notNull(ld.toolkit) || ld.toolkit == "fx") {
+               sparams["javafx_version"] = ((platform.javafx == "*") ? "2.0+" : platform.javafx);
+            }
+            //FX requires new VM per applet, do it unconditionally
+            sparams["separate_jvm"] = true;
+            sparams["javafx_applet_id"] = r.id;
+            //enable scripting for FX unconditionally for now
+            sparams["scriptable"] = true;
+        } else {
+            if (ld.scriptable) {
+                sparams["scriptable"] = true;
+            }
+            if (ld.sharedjvm) {
+                sparams["separate_jvm"] = true;
+            }
+        }
+        if (notNull(platform.jvmargs)) {
+            sparams["java_arguments"] = listToString(platform.jvmargs);
+        }
+
+        //prepare parameters first
+        var key, p;
+        for (key in ld.params) {
+            //do not let to override system parameters
+            if (!notNull(sparams[key])) {
+                p = d.createElement("param");
+                p.name = key;
+                p.value = ld.params[key];
+                r.appendChild(p);
+            }
+        }
+        for (key in sparams) {
+            p = d.createElement("param");
+            p.name = key;
+            p.value = sparams[key];
+            r.appendChild(p);
+        }
+
+        if (isDef(cb.onGetNoPluginMessage)) {
+            p = d.createElement("noapplet");
+            var t = cb.onGetNoPluginMessage(ld);
+            p.appendChild(t);
+            //TODO: FIXME: following line fails for me in IE7??
+            //r.appendChild(p);
+        }
+
+        wrapper.appendChild(r);
+        return wrapper;
+    }
+
+    function findAppletDiv(id) {
+        //TODO: FIXME: in static deployment scenario this seem to cause restart of plugin (in FF)
+        //Weird but similar code works in the deployJava.js ...
+        //TODO: reinvestigate
+        var el = d.getElementById(id + "-app");
+        if (el == null) { //wrapping div for applet is not required
+            el = d.getElementById(id);
+        }
+        return el;
+    }
+
+    //IMPORTANT: whilst we can update style on the applet element itself
+    //  this is not best idea as this may also cause wait till liveconnect
+    //  is initialized and slow startup.
+    function showHideApplet(div, hide) {
+        if (!notNull(div)) return;
+        if (hide) {
+            div.style.left = -10000;
+        } else {
+            div.style.left = "0px";
+        }
+    }
+
+    function showHideDiv(div, hide) {
+        if (!notNull(div)) return;
+        if (hide) {
+            div.style.visibility = "hidden";
+        } else {
+            div.style.visibility = "visible";
+        }
+    }
+
+    function doHideSplash(id) {
+        try {
+            var errPane = getErrorDiv(id);
+            if (errPane != null && errPane.style != null && errPane.style.visibility == "visible") {
+                //if we have error pane shown then ignore this request
+                // (could be race condition and applet is asking to hide splash to show error too)
+                return;
+            }
+
+            var el = findAppletDiv(id);
+            showHideApplet(el, false);
+
+            //show applet first and then hide splash to avoid blinking
+            showHideDiv(d.getElementById(id + "-splash"), true);
+        } catch(err) {}
+    }
+
+    var javafxURL = "https://java.com/javafx";
+
+    //TODO: validate ALL messages are shown as expected and when expected (for applet/webstart/install)
+    var errorMessages = {
+        "launch:fx:generic" : ["JavaFX application could not launch due to system configuration.",
+            " See ", "a", "https://java.com/javafx", "java.com/javafx",
+            " for troubleshooting information."],
+        "launch:fx:generic:embedded" : ["JavaFX application could not launch due to system configuration ",
+            "(", "onclick", "show error details", ").",
+            " See ", "a", "https://java.com/javafx", "java.com/javafx",
+            " for troubleshooting information."],
+        "install:fx:restart" : ["Restart your browser to complete the JavaFX installation,",
+            " then return to this page."],
+        "install:fx:error:generic" : ["JavaFX install not completed.",
+            " See ", "a", "https://java.com/javafx", "java.com/javafx",
+            " for troubleshooting information."],
+        "install:fx:error:download" : ["JavaFX install could not start because of a download error.",
+            " See ", "a", "https://java.com/javafx", "java.com/javafx",
+            " for troubleshooting information."],
+        "install:fx:error:cancelled" : ["JavaFX install was cancelled.",
+            " Reload the page and click on the download button to try again."],
+        "install:jre:error:cancelled" : ["Java install was cancelled.",
+            " Reload the page and click on the download button to try again."],
+        "install:jre:error:generic" : ["Java install not completed.",
+            " See ", "a", "https://java.com/", "java.com",
+            " for troubleshooting information."],
+        "install:jre:error:download" : ["Java install could not start because of a download error.",
+            " See ", "a", "https://java.com/", "java.com/",
+            " for troubleshooting information."],
+        "install:inprogress:jre" : ["Java install in progress."],
+        "install:inprogress:javafx" : ["JavaFX install in progress."],
+        "install:inprogress:javafx:manual" : ["Please download and run JavaFX Setup from ",
+            "a", getFxUrl(null), "java.com/javafx",
+            ". When complete, restart your browser to finish the installation,",
+            " then return to this page."],
+        "install:inprogress:jre:manual" : ["Please download and run Java Setup from ",
+            "a", getJreUrl(), "java.com/download",
+            ". When complete, reload the page."],
+        "install:fx:error:nojre" : ["b", "Installation failed.", "br",
+            "Java Runtime is required to install JavaFX and view this content. ",
+            "a", getJreUrl(), "Download Java Runtime",
+            " and run the installer. Then reload the page to install JavaFX."],
+        "browser":    [ 'Content can not be displayed using your Web browser. Please open this page using another browser.'],
+        "jre:none":    [ 'JavaFX application requires a recent Java runtime. Please download and install the latest JRE from ',
+            'a', 'https://java.com', "java.com", '.'],
+        "jre:old" :    [ 'JavaFX application requires a recent Java runtime. Please download and install the latest JRE from ',
+            'a', 'https://java.com', "java.com", '.'],
+        "jre:plugin":  ['b', "A Java plugin is required to view this content.", 'br',
+            "Make sure that ", "a", 'https://java.com', "a recent Java runtime",
+            " is installed, and the Java plugin is enabled."],
+        "jre:blocked": ["Please give Java permission to run. This will allow Java to present content provided on this page."],
+        "jre:unsupported": ["b", "Java is required to view this content but Java is currently unsupported on this platform.",
+            "br", "Please consult ", "a", "https://java.com", "the Java documentation",
+            " for list of supported platforms."],
+        "jre:browser" : ["b", "Java plugin is required to view this content but Java plugin is currently unsupported in this browser.",
+            "br", "Please try to launch this application using other browser. Please consult ",
+            "a", "https://java.com", "the Java documentation",
+            " for list of supported browsers for your OS."],
+        "javafx:unsupported" : ["b", "JavaFX 2.0 is required to view this content but JavaFX is currently unsupported on this platform.",
+            "br", "Please consult ", "a", javafxURL, "the JavaFX documentation",
+            " for list of supported platforms."],
+        "javafx:old" :    [ 'This application requires newer version of JavaFX runtime. ',
+            'Please download and install the latest JavaFX Runtime from ',
+            'a', javafxURL, "java.com/javafx", '.'],
+        "javafx:none" : ["b", "JavaFX 2.0 is required to view this content.",
+            "br", "a", javafxURL, "Get the JavaFX runtime from java.com/javafx",
+            " and run the installer. Then restart the browser."],
+        "javafx:disabled" : ["JavaFX is disabled. Please open Java Control Panel, switch to Advanced tab and enable it. ",
+            "Then restart the browser."],
+        "jre:oldplugin" : ["New generation Java plugin is required to view this content." +
+                " Please open Java Control Panel and enable New Generation Java Plugin."],
+        "jre:disabled" : ["Java plugin appear to be disabled in your browser. ",
+                " Please enable Java in the browser options."]
+    };
+
+    //assume we get list of (tag, param, text) where both param and tag are optional
+    // Supported tags:
+    //  ("a", href value, link text)
+    //  ("b", text)
+    //  ("br")
+    //  (text) //text can not be the same as any of tag names
+    function msgAsDOM(lst, extra, onClickFunc) {
+        var i = 0;
+        var root = d.createElement("p");
+
+        if (extra != null) {
+            root.appendChild(extra);
+        }
+        var el;
+        while (i < lst.length) {
+            switch (lst[i]) {
+                case "a":
+                    el = d.createElement(lst[i]);
+                    el.href = lst[i + 1];
+                    el.appendChild(d.createTextNode(lst[i + 2]));
+                    i = i + 2;
+                    break;
+                case "br":
+                    el = d.createElement(lst[i]);
+                    break;
+                case "b":
+                    el = d.createElement(lst[i]);
+                    el.appendChild(d.createTextNode(lst[i + 1]));
+                    i++;
+                    break;
+                case "onclick":
+                    el = d.createElement("a");
+                    el.href = "";
+                    if (onClickFunc == null) {
+                       onClickFunc = function() {return false;}
+                    }
+                    el.onclick = onClickFunc;
+                    el.appendChild(d.createTextNode(lst[i + 1]));
+                    i = i + 1;
+                    break;
+                default:
+                    el = d.createTextNode(lst[i]);
+                    break;
+            }
+            root.appendChild(el);
+            i++;
+        }
+        return root;
+    }
+
+    function webstartErrorMsg(code) {
+        var m = "";
+        var lst = errorMessages[code];
+        var i = 0;
+        if (notNull(lst)) {
+          while (i < lst.length) {
+              if (lst[i] != 'a' && lst[i] != 'br' && lst[i] != 'b') {
+                  m += lst[i];
+              } else if (lst[i] == 'a') { //next element is link => skip it
+                  i++;
+              }
+              i++;
+          }
+        } else {
+            m = "Unknown error: ["+code+"]";
+        }
+        return m;
+    }
+
+    function getErrorDiv(id) {
+        return d.getElementById(id + "-error");
+    }
+
+    function showAppletError(id, code, onclickFunc) {
+        var pane = getErrorDiv(id);
+
+        if (!notNull(pane)) { //should not be possible, we add error pane right a way and then add it again before we add splash/app
+            return;
+        }
+
+        //remove old content in the ERROR PANE only (if any)
+        wipe(pane);
+
+        //populate and show pane
+        pane.appendChild(appletErrorMsg(code, onclickFunc));
+        pane.style.visibility = "visible";
+
+        //hide splash and applet
+        showHideDiv(d.getElementById(id+"-splash"), true);
+        showHideApplet(findAppletDiv(id), true);
+    }
+
+    //returns DOM subtree
+    function appletErrorMsg(code, onclickFunc) {
+        var out = d.createElement("div");
+        var img = d.createElement("img");
+        img.src = jscodebase + 'error.png';
+        img.width = '16px';
+        img.height = '16px';
+        img.alt = "";
+        img.style.cssFloat = "left";
+        img.style.styleFloat = "left"; //IE way
+        img.style.margin = "0px 10px 60px 10px";
+        img.style.verticalAlign="text-top";
+
+        var m = errorMessages[code];
+        //error message is missing => show code as fallback
+        if (!notNull(m)) {
+            m = [code];
+        }
+
+        var hideFunc = null;
+
+        if (isDef(onclickFunc)) {
+            hideFunc = function() {
+                if (notNull(out.parentNode)) {
+                  out.parentNode.removeChild(out);
+                }
+                try {
+                    onclickFunc();
+                } catch (e) {}
+                return false;
+            }
+        }
+
+        out.appendChild(msgAsDOM(m, img, hideFunc));
+        return out;
+    }
+
+    //returns DOM subtree
+    function appletInfoMsg(code) {
+        var out = d.createElement("div");
+
+        var m = errorMessages[code];
+        //error message is missing => show code as fallback
+        if (!notNull(m)) {
+            m = [code];
+        }
+
+        out.appendChild(msgAsDOM(m, null, null));
+        return out;
+    }
+
+    function normalizeApp(ld, acceptString) {
+        var app = null;
+        //normalize launch descriptor
+        if (notNull(ld)) {
+            //could be either url or set of parameters
+            if (acceptString && typeof ld === 'string') {
+                app = new dtjava.App(ld, null);
+            } else if (ld instanceof dtjava.App) {
+                app = ld;
+            } else {
+                app = new dtjava.App(ld.url, ld);
+            }
+        }
+        return app;
+    }
+
+    function setupAppletCallbacks(platform, callbacks) {
+        //set default callbacks
+        var cb = new dtjava.Callbacks(callbacks);
+
+        //disable splash if it is was not requested explicitly and
+        // it is not JavaFX app
+        if (platform.javafx == null && cb.onGetSplash === defaultGetSplashHandler) {
+            cb.onGetSplash = null;
+        }
+        return cb;
+    }
+
+    //width and height in styles need to have unit type explicitly referenced
+    // or they will not conform to strict doctypes
+    //On other hand we can have relative dimensions, e.g. 100% and these are fine without units
+    //
+    //This method will add unit type to numeric dimension specifications. E.g.
+    //   400 => 400px
+    //   -10 => -10px
+    //   50% => 50%
+    function normalizeDimension(v) {
+        if (isFinite(v)) {
+            return v + 'px';
+        } else {
+            return v;
+        }
+    }
+
+    //wrap given node s in the div
+    function wrapInDiv(ld, s, suffix) {
+        var sid = ld.id + "-" + suffix;
+        var div = d.createElement("div");
+        div.id = sid;
+        div.style.width = normalizeDimension(ld.width);
+        //this does not work well for different browsers
+        //if height is relative ...
+        //For firefox it becomes better if 100% is hardcode
+        // but then image is off in Chrome and it does not work in IE too ...
+        div.style.height = normalizeDimension(ld.height);
+        div.style.position = "absolute";
+        //TODO: provide way to specify bgcolor
+        // Perhaps app.style.bgcolor, app.style.splash-image, ... ?
+        // What was the param name supported by regular applet?
+        div.style.backgroundColor = "white";
+        if (s != null) {
+            div.appendChild(s);
+        }
+        return div;
+    }
+
+    var pendingCallbacks = {};
+
+    function doInstallCallbacks(id, cb) {
+        if (cb == null) {
+            cb = pendingCallbacks[id];
+            if (notNull(cb)) {
+              pendingCallbacks[id] = null;
+            } else {
+                return;
+            }
+        }
+        var a = document.getElementById(id);
+        if (!notNull(a)) return;
+
+        if (isDef(cb.onJavascriptReady)) {
+            var onReady = cb.onJavascriptReady;
+            if (a.status < 2) { //not READY yet
+              a.onLoad = function() {
+                  onReady(id);
+                  a.onLoad = null; //workaround bug in plugin for IE in JRE7
+              }
+            }
+        }
+
+        if (isDef(cb.onRuntimeError)) {
+            if (a.status < 3) { //not ERROR or READY yet
+               a.onError = function() {
+                  cb.onRuntimeError(id);
+                  //This used to be added as
+                  //  "workaround bug in plugin for IE in JRE7"
+                  //I do not have recollection what the bug was
+                  // and can not reproduce it now
+                  //(perhaps multiple calls into callback?)
+                  //With FX 2.0 it cause restart of the applet in IE
+                  // for reason that is not completely clear
+                  //Disable it for now
+                  /*   a.onError = null; */
+              }
+            } else if (a.status == 3) { //already failed, call handler in place
+               cb.onRuntimeError(id);
+            }
+        }
+    }
+
+
+    //we can not install applet callbacks until applet is instantiated as
+    //hook entry points are not defined and we do not control when applet is
+    //instantiated as developer may not add it to the DOM tree for a while.
+    //
+    //Therefore what we do is we insert <script> element AFTER applet tag
+    //to initiate install after applet tag is parsed
+    //
+    //However, we can not
+    //
+    function getSnippetToInstallCallbacks(id, cb) {
+        if (!notNull(cb) || !(isDef(cb.onDeployError) || isDef(cb.onJavascriptReady))) {
+            return null;
+        }
+
+        var s = d.createElement("script");
+        pendingCallbacks[id] = cb;
+        s.text = "dtjava.installCallbacks('"+id+"')";
+        return s;
+    }
+
+    function getErrorPaneSnippet(app) {
+        var paneDiv = wrapInDiv(app, null, "error");
+        paneDiv.style.visibility = "hidden";
+        return paneDiv;
+    }
+
+    function doEmbed(ld, platform, callbacks) {
+        var app = normalizeApp(ld, false);
+        //required argument is missing
+        if (!(notNull(app) && notNull(app.url) &&
+              notNull(app.width) && notNull(app.height) && notNull(app.placeholder))) {
+            //deployment error, not runtime => exception is ok
+            throw "Required attributes are missing! (url, width, height and placeholder are required)";
+        }
+
+        app.id = prepareAppletID(app);
+
+        //if placeholder is passed as id => find DOM node
+        if ((typeof app.placeholder == "string")) {
+           var p = d.getElementById(app.placeholder);
+           if (p == null) {
+               throw "Application placeholder [id="+app.placeholder+"] not found.";
+           }
+            app.placeholder = p;
+        }
+
+        //we may fail before we even try to add splash. E.g. because it is unsupported platform
+        //make sure we have error pane in place to show error
+        app.placeholder.appendChild(getErrorPaneSnippet(app));
+
+        //if we got array we need to copy over!
+        platform = new dtjava.Platform(platform);
+
+        var cb = setupAppletCallbacks(platform, callbacks);
+
+        //allow family match to match next family
+        //Once we get to java layer we will deal with it there
+        var v = doValidateRelaxed(platform);
+        var launchFunction = function() {
+            var appSnippet = getAppletSnippet(app, platform, cb);
+            var splashSnippet = (cb.onGetSplash == null) ? null : cb.onGetSplash(ld);
+
+            //what we try to do:
+            // placeholder need to have relative positioning (then splash will pe position relative to it)
+            // if splash is present it needs to have position "absolute", then it will not occupy space
+            //  and can be placed on top of applet
+            app.placeholder.style.position = "relative";
+            if (splashSnippet != null) {
+                //position splash on top of applet area and hide applet temporarily
+                var ss = wrapInDiv(app, splashSnippet, "splash");
+                showHideDiv(ss, false);
+                showHideApplet(appSnippet, true);
+
+                wipe(app.placeholder);
+                app.placeholder.appendChild(getErrorPaneSnippet(app));
+                app.placeholder.appendChild(ss);
+                app.placeholder.appendChild(appSnippet);
+            } else {
+                wipe(app.placeholder);
+                app.placeholder.appendChild(getErrorPaneSnippet(app));
+                app.placeholder.appendChild(appSnippet);
+            }
+            //Note: this is not needed as we use setTimeout for the same
+            //var cbSnippet = getSnippetToInstallCallbacks(app.id, cb);
+            //if (cbSnippet != null) {
+            //    app.placeholder.appendChild(cbSnippet);
+            //}
+            setTimeout(function() {doInstallCallbacks(app.id, cb)}, 0);
+        };
+
+        //can not launch yet
+        if (v != null) {
+            resolveAndLaunch(app, platform, v, cb, launchFunction);
+        } else {
+            launchFunction();
+        }
+    }
+
+    function extractApp(e) {
+        if (notNull(e)) {
+            var w = e.width;    //TODO: do we need to extract number? e.g. if it was 400px? or 100%?
+            var h = e.height;
+            var jnlp = "dummy"; //Can find it from list of parameters but it is not really needed in
+                                //static deployment scenario
+            return new dtjava.App(jnlp, {
+                id: e.id,
+                width: w,
+                height: h,
+                placeholder: e.parentNode
+            });
+        } else {
+            throw "Can not find applet with null id";
+        }
+    }
+
+    function processStaticObject(id, platform, callbacks) {
+        var a = d.getElementById(id); //TODO: use findAppletDiv??
+        var app = extractApp(a);
+
+        var cb = setupAppletCallbacks(platform, callbacks);
+        //Ensure some platform is set
+        platform = new dtjava.Platform(platform);
+
+        var launchFunc = function() {
+            //add error pane
+            app.placeholder.insertBefore(getErrorPaneSnippet(app), a);
+
+            if (cb.onGetSplash != null) {
+                //TODO: show splash if it was not hidden yet!
+                var splashSnippet = cb.onGetSplash(app);
+                if (notNull(splashSnippet)) {
+                    var ss = wrapInDiv(app, splashSnippet, "splash");
+                    if (notNull(ss)) {
+                        app.placeholder.style.position = "relative";
+                        app.placeholder.insertBefore(ss, a);
+                        showHideApplet(a, true);
+                    }
+                }
+            }
+
+            //TODO: install applet callbacks if they are provided
+            //Note - in theory we need to check if callbacks are supported too
+            // but if detection was not possible then it is hard to do
+            //they always wotk for FX or jre 7+ but how validate this?
+            //otherwise attempt to set them will block js and then trigger exception ...
+        }
+
+        var v = doValidateRelaxed(platform);
+        if (v != null) {
+            //TODO: Problem
+            //  if FX missing and static deployment
+            // then JRE will try to autoinstall itself - this will cause popup
+            // Then DT will detect problem and also initiate install too
+            //   a) double install
+            //   b) if popup is canceled then we still offer to install again but it will not help applet to launch
+            //   c) popup is unconditional and really ugly ...
+            //But popup comes from JRE7 - can not fix it, on other hand 6 will go manual install route
+
+            resolveAndLaunch(app, platform, v, cb, launchFunc);
+        } else {
+            launchFunc();
+        }
+    }
+
+    function doRegister(id, platform, cb) {
+        //we will record static object and process it once onload is done
+        addOnDomReady(function() {
+            processStaticObject(id, platform, cb);
+        });
+    }
+
+    //perform basic (lightweight) initialization
+    init();
+
+    /**
+     The Java Deployment Toolkit is utility to deploy Java content in
+     the browser as applets or applications using right version of Java.
+     If needed it can initiate upgrade of user's system to install required
+     components of Java platform.
+     <p>
+     Note that some of Deployment Toolkit methods may not be fully operational if
+     used before web page body is loaded (because DT native plugins could not be instantiated).
+     If you intend to use it before web page DOM tree is ready then dtjava.js needs to be loaded inside the
+     body element of the page and before use of other DT APIs.
+
+     @class dtjava
+     @static */
+    return {
+        /**
+         Version of Javascript part of Deployment Toolkit.
+         Increasing date lexicographically.
+
+         @property version
+         @type string
+         */
+        version: "20150817",
+
+        /**
+         Validate that platform requirements are met.
+
+         @param platform {Platform}
+         (Optional) set of platform requirements.
+         <p>
+
+         Default settings are
+         <ul>
+         <li>platform.jvm : "1.6+"
+         <li>platform.javafx : null
+         <li>platform.plugin : "*"
+         </ul>
+
+         @return {PlatformMismatchEvent}
+         Returns null if all requirements are met.
+         Return PlatformMismatchEvent describing the problem otherwise.
+         */
+        validate: function(platform) {
+            return doValidate(platform, ua.noPluginWebBrowser);
+        },
+
+        /**
+         Perform install of missing components based on given
+         platform requirements. By default if automated install is
+         not possible then manual install will be offered.
+
+         @method install
+         @param platform {Platform}
+         Description of platform requirements.
+         @param callbacks {Callbacks}
+         Optional set of callbacks to customize install experience.
+         @return {boolean}
+         Returns true if install was initiated.
+
+         */
+        install: function(platform, callbacks) {
+            return doInstall(null, platform, callbacks, null);
+        },
+
+        //              (TODO: AI: what are limitations on "connect back to origin host?"
+        //                   can someone provide us fake JNLP url to get access to other host?
+        //                   Perhaps we should support this for relative URLs only?)
+        /**
+         Launch application (not embedded into browser) based on given
+         application descriptor. If launch requirements are not met
+         then autoinstall may be initiated if requested and supported.
+         By default autoinstall is disabled.
+
+         @method launch
+         @param ld {App | string | array}
+         Application launch descriptor. Could be defined as one of following:
+         <ul>
+         <li>instance of App object,
+         <li>string with URL of application JNLP file
+         <li>or array (where URL attribute is required)
+         </ul>
+         At least link to JNLP file must be provided (could be full URL or relative to
+         document location).
+         <p>
+         Note that passing parameters through the Apps object is not supported by this method.
+         Any parameters specified will be ignored.
+
+         @param platform {Platform}
+         Optional platform requirements (such as JRE and JavaFX versions).
+
+         @param callbacks {Callbacks | array}
+         Optional set of callbacks. See Callbacks for details.
+         */
+            //this will not use jvargs either but we do not necessary need to document it
+        launch: function(ld, platform, callbacks) {
+            return doLaunch(ld, platform, callbacks);
+        },
+
+        /**
+         Embeds application into browser based on given application descriptor
+         (required elements: url of JNLP file, width and height, id or reference to placeholder node).
+         <p>
+         If JRE or JavaFX installation is required then default handler is to return "click to install" html snippet.
+         To enable autoinstall custom onDeployError handler need to be used.
+         <p>
+         If applet can not be launched because platform requirements are not met
+         (e.g. DT plugin is not available or mandatory parameters are missing)
+         return value will be null.
+         <p>
+         Set applet identifier in the launch descriptor if you want to name your
+         applet in the DOM tree (e.g. to use it from javascript later).
+
+         @method embed
+         @param ld {App | string | array}
+         Application launch descriptor. Could be defined as one of following:
+         <ul>
+         <li>instance of App object,
+         <li>array (where attribute names are same as in App object)
+         </ul>
+         At least link to JNLP file, width and height must be provided.
+         @param platform {Platform}
+         Optional platform requirements (such as JRE and JavaFX versions).
+         @param cb {Callbacks | array}
+         Optional set of callbacks. See Callbacks for details.
+         @return {void}
+         */
+        embed: function(ld, platform, cb) {
+            return doEmbed(ld, platform, cb);
+        },
+
+        /**
+         Registers statically deployed Java applet to customize loading experience
+         if Javascript is enabled.
+         <p>
+         Note that launch of statically deployed applet will be initiated
+         before this this function will get control. Hence platform
+         requirements listed here will NOT be validated prior to launch
+         and will be used if applet launch can not be initiated otherwise.
+
+         @method register
+         @param id
+         Identifier of application.
+         @param platform {Platform}
+         Optional platform requirements (such as JRE and JavaFX versions).
+         @param cb {Callbacks | array}
+         Optional set of callbacks. See Callbacks for details.
+         */
+        register: function(id, platform, callbacks) {
+            return doRegister(id, platform, callbacks);
+        },
+
+
+        /**
+         * Hides html splash panel for applet with given id.
+         * If splash panel does not exist this method has no effect.
+         * For JavaFX applications this method will be called automatically once application is ready.
+         * For Swing/AWT applets application code need to call into this method explicitly if they were deployed
+         * with custom splash handler.
+         *
+         * @method hideSplash
+         * @param id    Identifier of applet whose splash panel need to be hidden
+         */
+        hideSplash: function(id) {
+            return doHideSplash(id);
+        },
+
+        /**
+         Helper function: cross-browser onLoad support
+         <p>
+         This will call fn() once document is loaded.
+         If page is already loaded when this method is
+         called then fn() is called immediately.
+         <p>
+         If strictMode is true then fn() is called once page
+         and all its assets are loaded (i.e. when document
+         ready state will be 'complete').
+         Otherwise fn() is called after DOM tree is fully created
+         (but some assets may not yet be loaded).
+         <p>
+         It is ok to call this function multiple times. It will append
+         to existing chain of events (and do not replace them).
+
+         @method addOnloadCallback
+
+         @param {function} fn
+         (required) function to call
+
+         @param strictMode {boolean} Flag indicating whether page assets need to
+         be loaded before launch (default is false).
+         */
+        addOnloadCallback: function(fn, strictMode) {
+            //WORKAROUND for RT-21574
+            // avoid using onDomReady because it leads to deadlocks
+            if (strictMode || (ua.chrome && !ua.win)) {
+                addOnload(fn);
+            } else {
+                addOnDomReady(fn);
+            }
+        },
+
+        /**
+         * Add onJavascriptReady and onDeployError callbacks
+         * to the existing Java applet or JavaFX application.
+         * Application need to be alive in the browser DOM tree for this to work
+         *
+         * @param id {string} applet id
+         * @param cb {array}  Set of callbacks. If null then pending callbacks are installed (if any for this applet).
+         * @private
+         */
+        installCallbacks: function(id, cb) {
+            doInstallCallbacks(id, cb);
+        },
+
+        /** Platform requirements for application launch.
+
+         <p><br>
+         The version pattern strings are of the form #[.#[.#[_#]]][+|*],
+         which includes strings such as "1.6", * "2.0*", and "1.6.0_18+".
+         <p>
+
+         A star (*) means "any version within this family" where family is defined
+         by prefix and a plus (+) means "any version greater or equal to the specified version".
+         For example "1.6.0*" matches 1.6.0_25 but not 1.7.0_01,
+         whereas "1.6.0+" or "1.*" match both.
+         <p>
+         If the version pattern does not include all four version components
+         but does not end with a star or plus, it will be treated as if it
+         ended with a star.  "2.0" is exactly equivalent to "2.0*", and will
+         match any version number beginning with "2.0".
+         <p>
+         Null version string is treated as "there is no requirement to have it installed".
+         Validation will pass whether this component is installed or not.
+         <p>
+         Both "+" and "*" will match any installed version of component. However if component is not
+         installed then validation will fail.
+
+         @class Platform
+         @for dtjava
+         @constructor
+         @param r {array}
+         Array describing platform requirements. Element names should match
+         Platform properties.
+         */
+        Platform: function(r) {
+            //init with defaults
+
+            /**
+             JRE/JVM version.
+             @property jvm
+             @type version pattern string
+             @default "1.6+"
+             */
+            this.jvm = "1.6+";
+            /**
+             Minimum JavaFX version.
+             @property javafx
+             @type version pattern string
+             @default null
+             */
+            this.javafx = null;
+            /**
+             Java Plugin version.
+             If set to null then browser plugin support for embedded content is not validated.
+             @property plugin
+             @type version pattern string
+             @default "*"
+             */
+            this.plugin = "*";
+            /**
+             List of requested JVM arguments.
+             @property jvmargs
+             @type string
+             @default null
+             */
+            this.jvmargs = null;
+
+            //copy over
+            for (var v in r) {
+                this[v] = r[v];
+                //we expect jvmargs to come as array. if not - convert to array
+                if (this["jvmargs"] != null && typeof this.jvmargs == "string") {
+                    this["jvmargs"] = this["jvmargs"].split(" ");
+                }
+            }
+
+           /**
+             * @method toString
+             * @return {string}
+             *    Returns string replesentation of platform spec. Useful for debugging.
+             */
+            this.toString = function() {
+                return "Platform [jvm=" + this.jvm + ", javafx=" + this.javafx
+                + ", plugin=" + this.plugin + ", jvmargs=" + this.jvmargs + "]";
+            };
+        },
+
+        /**
+         Application launch descriptor.
+
+         @class App
+         @for dtjava
+         @constructor
+         @param url {string}
+         (Required) location of JNLP file. Could be full URL or partial
+         relative to document base.
+         @param details {array}
+         (Optional) set of values for other object properties.
+         Name should match documented object properties.
+         */
+        App: function(url, details) {
+            /**
+             Location of application's JNLP file.  Can not be null or undefined.
+             @property url
+             @type string
+             */
+            this.url = url;
+
+            //default behavior
+            this.scriptable = true;
+            this.sharedjvm = true;
+
+            if (details != undefined && details != null) {
+                /**
+                 Identifier of this App. Expected to be unique on this page.
+                 If null then it is autogenerated.
+                 @property id
+                 @type string
+                 */
+                this.id = details.id;
+                /**
+                 Base64 encoded content of JNLP file.
+                 @property jnlp_content
+                 @type string
+                 */
+                this.jnlp_content = details.jnlp_content;
+                /**
+                 Applet width. Could be absolute or relative (e.g. 50 or 50%)
+                 @property width
+                 @type string
+                 */
+                this.width = details.width;
+                /**
+                 Applet height. Could be absolute or relative (e.g. 50 or 50%)
+                 @property height
+                 @type int
+                 */
+                this.height = details.height;
+
+                /**
+                 Set of named parameters to pass to application.
+                 @property params
+                 @type array
+                 */
+                this.params = details.params;
+
+                /**
+                 If set to true then Javascript to Java bridge will be initialized.
+                 Note that some platform requirements imply Javascript bridge is initialized anyways.
+                 If set to false the Java to Javascript calls are still possible.
+
+                 //TODO: AI: will it affect applet callbacks?
+
+                 @property scriptable
+                 @type boolean
+                 @default true
+                 */
+                this.scriptable = details.scriptable;
+
+                /**
+                 True if application does not need JVM instance to be dedicated to this application.
+                 Some of platform requirements may imply exclusive use of JVM.
+                 <p>
+                 Note that even if sharing is enabled java plugin may choose to run applets in different JVM
+                 instances. There is no way to force java plugin to reuse same JVM.
+
+                 @property sharedjvm
+                 @type boolean
+                 @default true
+                 */
+                this.sharedjvm = details.sharedjvm;
+
+                /**
+                 Reference to DOM node to embed application into.
+                 If not provided by the user and application is embedded then will be allocated dynamically.
+                 <p>
+                 Note that element may be not inserted into the DOM tree yet.
+                 <p>
+                 User may also provide identifier of the existing DOM node to be used as placeholder.
+                 @property placeholder
+                 @type {DOM node | DOM node id}
+                 @default null
+                 */
+                this.placeholder = details.placeholder;
+
+                /**
+                  Tookit used by the application.
+                  By default it is "fx" (and null is treated as JavaFX too).
+                  Swing applications embedding JavaFX components need to pass "swing"
+                */
+                this.toolkit = details.toolkit;
+            }
+
+            /**
+             * Returns string representation of this object.
+             *
+             * @return {string}
+             */
+            this.toString = function() {
+                var pstr = "null";
+                var first = true;
+                if (notNull(this.params)) {
+                    pstr = "{";
+                    for (p in this.params) {
+                        pstr += ((first) ? "" : ", ") + p + " => " + this.params[p];
+                        first = false;
+                    }
+                    pstr += "}";
+                }
+                return "dtjava.App: [url=" + this.url + ", id=" + this.id + ", dimensions=(" + this.width + "," + this.height + ")"
+                    + ", toolkit=" + this.toolkit
+                    + ", embedded_jnlp=" + (notNull(this.jnlp_content) ? (this.jnlp_content.length + " bytes") : "NO")
+                    + ", params=" + pstr + "]";
+            }
+        },
+
+
+        /**
+         Set of callbacks to be used to customize user experience.
+
+         @class Callbacks
+         @for dtjava
+         @constructor
+         @param cb {list of callbacks}
+         set of callbacks to set
+         */
+        Callbacks: function(cb) {
+            /**
+             Callback to be called to obtain content of the splash panel. Gets application
+             launch descriptor as an input. If null is returned then splash is disabled.
+             Non-null return value is expected to be html snippet to be added into splash overlay.
+             Only applicable to embed().
+             <p>
+             Note that autohiding splash is not supported by all platforms. Splash will be hidden by default
+             for JavaFX application but not for Swing/AWT applets. In later case if use of splash is desirable
+             then app need to call dtjava.hideSplash() explicitly to initiate hiding splash.
+
+             @property onGetSplash
+             @type function(app)
+             @default Default splash panel for JavaFX applications embedded into web page, null otherwise.
+             */
+            this.onGetSplash = defaultGetSplashHandler;
+
+            /**
+             Called if embedding or launching application need
+             additional components to be installed. This callback is
+             responsible for handling such situation, e.g. reporting
+             need to install something to the user,
+             initiating installation using install() and
+             hiding splash panel for embedded apps (if needed).
+             After installation is complete callback implementation may
+             retry attempt to launch application using provided launch function.
+             <p>
+             This method is NOT called if platform requirement could not be met
+             (e.g. if platfrom is not supported or if installation
+             is not possible).
+             <p>Default handler provides "click to install" solution for
+             embedded application and attempt to perform installation without
+             additional questions for apps started using launch().
+             <p>
+             If handler is null then it is treated as no op handler.
+             <p>
+             Parameters:
+             <ul>
+             <li> <b>app</b> - application launch descriptor.
+                 For embedded applications app.placeholder will refer to
+                 the root of the applet area in the DOM tree (to be used for
+                 visual feedback)
+             <li> <b>platform</b> - application platform requirements
+             <li> <b>cb</b> - set of callbacks to be used during
+                   installation process
+             <li> <b>isAutoinstall</b> - true if install can be launched
+                 automatically
+             <li> <b>needRestart</b> - true if browser restart will be required
+                 once installation is complete
+             <li> <b>launchFunction</b> - function to be executed to
+                 retry launching the application once installation is finished
+             </ul>
+
+             @property onInstallNeeded
+             @type function(app, platform, cb, isAutoinstall, needRelaunch, launchFunc)
+             @default Default implementation shows "click to install" banner
+               for embedded applications or initiates installation immediately
+               for applications launched from web page.
+             */
+            this.onInstallNeeded = defaultInstallHandler;
+
+            /**
+             Called before installation of required component is triggered.
+             For manual install scenario it is called before installation
+             page is opened.
+             <p>
+             This method can be used to provide visual feedback to the user
+             during the installation. Placeholder
+             points to the area that can be used for visualization,
+             for embedded applications it will be applet area.
+             If null then callee need to find place for visualization on its own.
+             <p>
+             In case of automatic launch of installation onInstallFinished will be called
+             once installation is complete (succesfully or not).
+             <p>
+             If handler is null then it is treated as no-op handler.
+
+             Parameters:
+             <ul>
+             <li> <b>placeholder</b> - DOM element to insert visual feedback into.
+                  If null then callee need to add visual feedback to the document on its own
+                  (e.g. placeholder will be null if installation is not happening in context of embedding application into
+                  web page).
+             <li> <b>component</b> - String "Java", "JavaFX" or "Java bundle"
+             <li> <b>isAutoInstall</b> - true if installer will be launched
+                  automatically
+             <li> <b>restartNeeded</b> - boolean to specify whether browser restart will be required
+             </ul>
+
+             @property onInstallStarted
+             @type function(placeholder, component, isAuto, restartNeeded)
+             @default No-op
+             */
+            this.onInstallStarted = defaultInstallStartedHandler;
+
+            /**
+             Called once installation of required component
+             is completed. This method will NOT be called if installation is
+             performed in manual mode.
+
+             Parameters:
+             <ul>
+             <li> <b>placeholder</b> - DOM element that was passed to
+                 onInstallStarted to insert visual feedback into.
+             <li> <b>component</b> - String "jre" or "javafx"
+             <li> <b>status</b> - status code is string categorizing the status of install.
+             ("success", "error:generic", "error:download" or "error:canceled")
+             <li> <b>relaunchNeeded</b> - boolean to specify
+             whether browser restart is required to complete the installation
+             </ul>
+
+             @property onInstallFinished
+             @type function(placeholder, component, status, relaunchNeeded)
+             @default no op
+             */
+            this.onInstallFinished = defaultInstallFinishedHandler;
+
+            /**
+             This function is called if application can not be deployed because
+             current platform does not match given platform requirements.
+             It is also called if request to install missing components can not be
+             completed due to platform.
+             <p>
+             Problem can be fatal error or transient issue (e.g. relaunch needed). Further
+             details can be extracted from provided mismatchEvent. Here are some typical combinations:
+
+             <ul>
+             <li><em>Current browser is not supported by Java</em> - (r.isUnsupportedBrowser())
+             <li><em>Browser need to be restarted before application can be launched</em> - (r.isRelaunchNeeded())
+             <li>JRE specific codes
+             <ul>
+             <li><em>JRE is not supported on this platform</em> - (r.jreStatus() == "unsupported")
+             <li><em>JRE is not detected and need to be installed</em> - (r.jreStatus() == "none")
+             <li><em>Installed version of JRE does not match requirements</em> - (r.jreStatus() == "old")
+             <li><em>Matching JRE is detected but deprecated Java plugin is used and
+                     it does not support JNLP applets</em> - (r.jreStatus() == "oldplugin")
+             </ul>
+             <li> JavaFX specific codes
+             <ul>
+             <li><em>JavaFX is not supported on this platform</em> - (r.javafxStatus() == "unsupported")
+             <li><em>JavaFX Runtime is missing and need to be installed manually</em> - (r.javafxStatus() == "none")
+             <li><em>Installed version of JavaFX Runtime does not match requirements</em> - (r.javafxStatus() == "old")
+             <li><em>JavaFX Runtime is installed but currently disabled</em> - (r.javafxStatus() == "disabled")
+             </ul>
+             </ul>
+
+             Default error handler handles both application launch errors and embedded content.
+
+             @property onDeployError
+             @type function(app, mismatchEvent)
+             */
+            this.onDeployError = defaultDeployErrorHandler;
+
+            /**
+             * Called to get content to be shown in the applet area if Java plugin is not installed
+             * and none of callbacks helped to resolve this.
+             *
+             * @property onGetNoPluginMessage
+             * @type function(app)
+             * @return DOM Element object representing content to be shown in the applet area if
+             *         java plugin is not detected by browser.
+             */
+            this.onGetNoPluginMessage = defaultGetNoPluginMessageHandler;
+
+            /**
+             Called once applet is ready to accept Javascript calls.
+             Only supported for plugin version 10.0.0 or later
+             @property onJavascriptReady
+             @type function(id)
+             @default null
+             */
+            this.onJavascriptReady = null;
+
+            /**
+             Called if application failed to launch.
+             Only supported for plugin version 10.0.0 or later.
+
+             @property onRuntimeError
+             @type function(id)
+             @default no op
+             */
+            this.onRuntimeError = defaultRuntimeErrorHandler;
+
+            //overwrite with provided parameters
+            for (c in cb) {
+                this[c] = cb[c];
+            }
+        }
+    };
+}();
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  ‰PNG
+
+   IHDR   î   ›   e§P   tEXtSoftware Adobe ImageReadyqÉe<  hiTXtXML:com.adobe.xmp     <?xpacket begin="ï»¿" id="W5M0MpCehiHzreSzNTczkc9d"?> <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.3-c011 66.145661, 2012/02/06-14:56:27        "> <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"> <rdf:Description rdf:about="" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmpMM:OriginalDocumentID="xmp.did:0180117407206811822AAC76958E5BC8" xmpMM:DocumentID="xmp.did:FA4B0F08BBC511E1BCC2E5B54CD61AF9" xmpMM:InstanceID="xmp.iid:FA4B0F07BBC511E1BCC2E5B54CD61AF9" xmp:CreatorTool="Adobe Photoshop CS6 (Macintosh)"> <xmpMM:DerivedFrom stRef:instanceID="xmp.iid:0780117407206811822AC55AA5AD8061" stRef:documentID="xmp.did:0180117407206811822AAC76958E5BC8"/> </rdf:Description> </rdf:RDF> </x:xmpmeta> <?xpacket end="r"?>Ç4–;  "ÌIDATxÚì]	xTÕ½ÿO&û¾'€„°¯€¨€Uûµu«U´nUñ½ïÕ–g}hí«ui+µ‹õ©hµ•jmE¤ €ŠÈ*d_„„„ldßf2ïüNæÜÜ™ÌšdÂdøÿ¾ïfîrî¹çœ{~ç¿œó¿1PWÄ¤ÛŒÖsb0¾†Åº™ÅÖ®Û,ö$µ'l°ØB­[˜ØB˜¼FŸ“¶Ml-bkµn&=:Ò­dÈÍÍMûÓŸşôRjjê111ÑAAAÜ¤F¡½½êêêêÏ;·íÁ|lãÆeât“•À µE×h•®ÑË—/Ÿ±xñâ¿FGG‡q2õõõ-o¼ñÆíK–,ÙŒC«6+õ’6zÚ´i—¬_¿~› m(7ƒá7äm7oŞÛ·o?e%o«R‘#Å–”——·"''g7ƒá_Ø»wï—^zéİb·RlÊsµ8633s*7ƒá°r3ÖÊÕ E\¨ÆQ‰‰‰‘ÜD†ÿÁÊÍ(+WƒÔ<-¦|ÂÙ{Ì`ø'¬Ü·rÕˆ#eçsó0~`+WŠ¸jñƒÁğcÁ«øªÈÊ«¢ÿ‡ÆS–²F?½ƒ‰Ë`0˜¸Ã¿ˆ»cÇºóûß§ıû÷w¹VRR"¯©4øõ
+òómÊS]]í—/«©©I¶‹¿äÓ[íêë÷ËÄíe\~ùå4hĞ ÚµkW—kyyyG&L ¿¼ı¶Lëüşå—i÷=~ÿ¢@¶Çüc***ò‹|z³]}ù~™¸>ÂÜyóhÏîİ²Cé±níZºöºë(""Â§Ï?{öl¿xQÍÍÍTSSã7ùJ»öW\ğÕRÓ¦M£~ğíÛ·Ou¡:£sMŸ>]S¥~ôğÃò:TªwÄ­:ßİ‹ÓìÙ³iÅŠ”ššJ,çé'MLwß}·&Æ'Óê¥$¶seetÙÔ‹¿¾óíÜ¹SîOç~äM}ë­·èğ¡Còxöœ9ZşÔÄ7ŞxCæÍáQ”Ôë¯½¦å?zÌúÁ~@¤÷Ş{6ù¥,÷çŸ}fS¿%>*ÿğûßScc£l7û|xàJHHğ*}{8«ã-·Ü"Ğ'şû¿):&FÇuÔë±Ç£ìaÃºH[oÚU½_hWÎê¤TnÔyèó»çŞ{e9íë o }Eµ‹ÊcÙ²e²ÎúK\; ¡gÌœI_[_  ÕjÿÂğBĞánşö·¥z…Æ^!È¢O™2…¶nÙ¢¥CÃC’+õ/gäÈ‘6ù¡ã@U_¸h‘Ö‰ôêÛ\Ş‡ü‘-¯-ÿİï(ÿøqZ³fCuô¥—^¢aÃ‡Ë´ îU¤…4Âı~õUD
+(÷Ñaqß÷aP?Ü‡ô :8:ÒÊ•+µ|åzå•W¼ÎÇ¾ÜÏşò—ZõÜs²«W¯î|ÅÅr ÁõôŞûïw©¿7íªÇöíÛéèÑ£ZÛÔ×ÕÑ‡~èRª£ŒH}UNõ,äƒr‚ŒÀçŸ.ûîÃµºúzú×®ºê*ù"1’¢ó a¯j²3»Wu8Œ ú0±—ÑZ½HsCªy¼8`üøñò·¢¢‚ò…Eşê¨ùPéí´ ÎÌ3:Fm!•ÿbí8¨çßú–¼ƒH€|Uç@ı”deh@{‚AbàùjpC¹ a”ÓÉ“|œ•ûö;îÇh/<ãcAeÊ`Rí©¯¤ZwÛÕxşúõëe_ø_1ˆ8Óh”™…²¨w-CK—.ÕÊ©$(˜`¸Oµ¿'ı‹Ue@#BÂîİ»—"##)66¶‹ú444È ÕJÜ‹—€Fi¥Ú•nsì`¨•ÀOò·÷«´‰II¶ƒ•8ÉºóêYêÔİ;Uª|B`³!µùØCI¯éà}èŸÕ#íÊ@´C ÈîLUUeSûè |xx¸&}¿}JïˆÃ@";*“«şÅÄu‚«gÍ¢?şXªi=’S¦ö€jø™D È}÷ß/_æÁ$y—
+û¬'Pê•»¨ÒVUVÚ *›$ˆ8¯&%ÉôĞĞ1¨œJzéÑ]/yrr²fCªr«E=Ó×€›2+00ÁÄq¤-©²©}åV¶xvv6-6êñşÿ.Le7ëïÓ;Eİõ/V• 6H¦õ€Ê‡vŠRƒñ’Ô1¤*®cÔ„êŒ®œÎÔäÈ‘Ö::“f>û¬tÄ8KûåæÍš]…Q
+FïV­ÒÌ8Q`s aè¡'ä³òİwµ¹Q8¤à³÷Î»ÊÇY¹áDRí»A¨­Ğd¼õî{Ú®z xŸ¨g¢½ Ç«J­Ê	_	!aÑ‡¾ûİïj3zg(•I¡ìaOúK\6Kyy¹ÓN)§
+JED§Rª”R—KKKå>6tÄkØË
+èÈ÷Ì÷ºRó µA4¥JatVö }Zx[áUViáDùáùù•wy NuCYA:û|@~<ÓÛ|”ŞY•WÙ[xÚ®z,Z´Hz¡Uğî\µ¤ªJ‹r*¢¢­•öÅû‡ÄÑW`:)“GùB<é_h8ÜÔs.$"-¶t¸‹e-1~5¤¦{LÛ=ıôÓÒËì©óò‚‘Õ`€Âr´R^«Ì¸¨€9\¨¿Ê¤X+ÔfHv'­_«Ê†¯1ş|©¾ßß}šªÜSÇ%«ÊƒUe#PÁÄe0˜¸£/ÀÎ)/ ¦!ì¡ğÁd=`í…‡¤¦¥õhŞŞWÔÛ×U_oj&.Cƒıü!‚¨ë¨ö‘9İ!-‚î×ß¦KXUf¸ÖY«È¤@B_İ3XâúÍ«Àp\CL­
+è7«_`ïì>O‚Íõªò¼yó´ÀsÄ­bÑßç,xÜ>èk¿]¨3Xâö+r"ª	k…íÕIWÁîˆEÜ±º†5°j=­«€rwô®€ ñŸ=ù¤¼[·n•åi±ù©u¾(‡}Ğ½« uK\¿$ş«^ÿ%lA{BCš‚ú`w,nW‹İõq¦“'MêX·Fí¨€r|d@ÙÎîòtg‡"2F_@z<q‚"¬AøØ Bõå²ÿ*£ŞfVêöñÀ&®ßÂ“Åí»ÃûŠh¨‚‚›/I8(ÏÉÉq›§+8‹ùETÖìª|¡R;ŠzÂÀá,@ÁÄ¸vGì):ÿDAFH®…ÒÏ?¯]wPWyvgSÒTÙ»PÍo¼ñF›t¿xæ§ê¶qî‚İAZ|Ls¬¤°“õ¤vPŞİ zg@>ˆ3UÁâ#FŒŸ½Á3õA÷îÔLÜ€‚İñ%xgAU»CbÁ9…óÿóä“ÚW?Nr  \œB* ÜUİÈ‰¼ñä‡|‘¿
+~WA÷pd)ÇÒáëê®¦ÁïªÿOğt?aÆ±¿ÆğÄ`ô²rtƒÁª2ƒÁ`â2&.ƒÁÄe0L\ƒÁÄe0˜¸ƒ‰Ë 2û7ƒ‰Ûß`©. KÅ~n·_ÁBæÂõÜŒƒÃúúõÅ<V2Xâö3E™Ú‹·…'pS0˜¸ıí§6¥î¥NäÆ`0qûÚÈ´õçdÒ6hp.·ƒ‰ëÿ²™Ú>[B–šB2æ<HÎmÂ`âú·~l¤}ŒÚO~B†ä±dœğCnF¯€½Ê¾BËyjûôj/ŞB†ˆ$
+™ÿš&¹¹L\ÿÕ«RÛº{ÈR{Š(4š‚¯[A†˜LÛ4M•Ô^ğ‘1Œ‚†Ì—äf0˜¸J;Î_Em_ü˜ÈÔ$È˜L! mjN'aÏ}CæoR{Å~
+¾Œ‚2gp£1˜¸PÎ’iÇ¯Èœ÷GydH)Hû¦&i!}áYÆ´qâıúíiÊÍÆ`â^81ÛFm—Õ·ã+ÿAƒgSÈÜ?J50x‹LÛ­A!Şa)Ë`âúƒ¤mÛø¨ mÇÍƒ²	Ò¾,D®±C
+o~‚Ìß&CT:…Üğ>â†p“1zê!Ìßü_'iÓ&SHîr+iIªÍ -GRÈ¢w™´&®_ÀÔL¦İ¿µ¶d0ÏûA!r¸¡ŒL_¿(÷ï%Cü0n/×/”äª#D­õ™u­¨Yfï±äymÀ4n,×o`ëlÈô)¶¤®9Ù¹_[ÈmÅ`âú‰#È™ªl/êT˜¿yUüiåc0qıƒ¹ÆÀ¨Æe{l6ãJô-¶ğKÜ^&®ßhËcï$Cò8j?¹,M›y•<¯Iİ¼?P{é×Ü`&®07”BæıA†ë™w<§Çrõó–v2oÿ¥OŠğË•ŸÑ÷Ÿ_)·Ÿ½¹ß	—á‘Æ7T®I6ç¯¢ö¢MçSÆSğU¿ĞÛKwûäùÍ­mÔØÒ*·&±Ï`â2<mÈôË$yM_ıL†ôiyÌí”zi‘9ˆÁÄõÃÆÌ¸’‚gşŠL_ÿÆV"[§ŠŒãîæFbô
+x­r`no§6S;…‡Û×K–úb2Dgt˜·bÆKršWIe-åS}S+ÅF…Óe#2)96Š™ÁÄí	Ú-:XXJ{O”Ğésçi@b,”J²Ò»4£!y¼¶o©:F†(
+³Üé0ZMf*;_G—fgĞ‰³•ôî¦½ôæ§_Ó¹“hÑåcz¥ümâÇŠ+¨°¬Š*kå±ÑDi	14aH:e$ÇÙ¤?YZEå5Úñ1]ò­on¥C§Ê´ãáÉ”¡#£gÊélU-Õ5¶ÈvŒ¥!i‰4iX…µ´h×º¦fJOˆ¥ŠÚ™™"ïÅ/ƒ‰ëj›éß;Ğú=Çd§»sîºeV…ÜmŒo¥àÙ¿qxÎ¤óõÍ40)V’Àş„¡è±W>äİE#2RzÔq‹ÊÏÓ{_~C»‘„3L3„¾a:……tt‰ü’
+zeÍvíú3?˜Oc§u¹ï€Ì^xÿíø¥nÄ]½ãmØsœÎTÔ8}fLD=´h:M9H;÷Ï-è¡…Óé™¿n ÿüöLzñ›èo?½;"×sXQÿCè|C³<N–çŠÎÕP|t8ÅD†u!pK›‰LævéİmjoCK
+Õ9-Ú$%]e]•U×SU]#Í—E7M×å¹±‘átÕØ,Z³ó0í<zºGÄ…äÚzè”Y"ÃC©E”OÕØz¨‚…^rãUòø²ƒèÏ‚¸ëõGŠ÷Ly§#&ƒ’ÜÛŸÖHk22GJ	z·Yº¦IÌî]@—¤%ĞàÔxÑ®”I—	2¿²f›”ô&®W0Õğ‰[çÒû
+è¸P3K„º÷‡Õ[½Ê#D¨‚I1‘”!Õë,¡"ææ§a“4éæP5ö³´™=óÊL¥99ÃhÊğL-ˆf£šşö__Ê_`óşt×¼)'llh„UUvˆä®k¦t%®N¢fHÒÔé9;9qè@IJWªìf3­ÛuTjÊO°V?° #cî¥ÃåïõSGÑ5“GÈÁ„ÁÄõC$ÊM³EÇƒzºÙ:gÚÒf–R62,DJ•pAHØnq¢óG‡{ÿyHííBJ+Û²'ˆeú‘PGîÁ…WĞÒ7Ö*Å^ØÀÕ‚läñÔ‘ƒ5â;_/¯I³ı*Â&W60YÛÏ½Ôq#4ØíP±¡¾…ÂV=¨cí÷p]^&n) ’BÂøo|ò5UÕzşä‘>wÌMOê2h(Àö|{cç¢‘b0Ñª.¼á
+TigÈJOÔˆ‹ÁáXñï~±—î_şaßzÿ	 •O	©¥'‡z,ìgvCŞqZ4mİ{İTßÜ.TQ8ÊôŞfØÛzÀ|P0Ñxéa÷Ğ!w&–¸}ƒæV}¸õ€°Ë,ôØŸVÉé 8RàL²wT5rÖ44QmC‹tH)¯¡2¡nÂ¹5(%Ï¿Œ&dĞÒcÚäåU[¤úıó;çÓØKÒz½ì˜{òÏP‘(Ke]#µˆsî¤¤î¿¬v,Te¨ÌpÒûNœíTq§:´Ù1­çØ±â)¡¦“ô¦3˜¸}xMŸ»g$o^~1m;|Ê«û1g:T¨ˆ <¼»°)áaİ($l±P9o•#	ĞÛøê`!½¾n§´Ë½…$î–6ê2´ sÚ
+9Ùmîkhn¥?~¼¶{ÙF&®O ï±›fHÉYZ]GÅµTUß(@V1JrÂ;›Eiñ16+¬Ïü)#.nèl¤ıí?¿Ô'Ï¤«Æ‘jp¬Uİğå:½N"ÌËÂæ–Ä=ÚAÜ
+¡!é¦‚¦èœ‹…§ø©w>¥g;œNhÔZDbL¤tÜ}¼ã°œîb0qû˜*Â’DLñô®¦„zŠ›y§v|Ó•ãè9“¼®çAJ,@•ËÕR;iiàu×ÛÂŸíÍ×H-HûâRrœíòÍ¨pş<;§úXDğë6ÑÑA=$k_‡Ü–VÛ,²¸ş²QİÊG¿²	õ8v¦œ¶
+I®€Å"zì-èT¡åšë8^síS‰‹—Âp¨yp¸lÛç‚¼é‰1Ù±h*2`2µK›$‡ıZ\Q#mÚù“GĞ‚©£¥úÜ[°8$€ÚÆ&›óPåíß±½s
+×íÓŒ’F¡!ÚÀõûHÑ¹‰,¶+Ç±¹§¶©E§6[ö+“ƒç2XUö)^>Z®6B4 è!¸ÃÎ£EJ7µÕ×«‚bí¦¬°ì;3&hÇhĞ¯GvxËá|RÎ¸M"E³IÂf†g]8İs!}±Ü3Şx gÜj1ğ­Úvˆ;×7À|+VÁ^rC.ø‡ƒÎš'nC¥Uu´;¿X.ÈÇT¤kS«I›¡DxÒf
+ûoHjËJ§Œ¤8·Ï…ô,ˆÁÉtÑ6XjÂœ·:–ş¾éÚ}¼˜Òâ£e4R~IÇ€ÇX»‰uYWŸr¡Ğì‘3´“äĞ:–¼òœ*íåƒ§Ê¤Ç™—22q{ kv¡}'ÏÒì	Ù4s|–œ{µTäSGõúóóòKƒ´ˆ!w0é¢~°¢Ks`¢`Iã‹ïoÒTb2Ø ,šøÖc¤ğÎg{\>Şh¬7†ê«€6ç`ÑÅ¬‰CiÛ‘Sš­¢~m]%` {ô[WÒÓİ ¯1ØÆí1 •şñÕ~¹N?gbvŸµ:1TéÏ¾) -ºÂãgÖèP)qÑ6÷M*î¯ï[@òòåbx„D0*3…®0TzÆO—Ÿ×VsašÈÑs#BƒéùSµi!`‰À&¶K‹cé÷fÓWNJ	_^Û µxà±öúr!½!}o›•#gˆ´â¾çĞXƒas˜Ùl^{±7È}Ë?°éœXS‹N˜¿MOˆ‘jfŒ.ÂÆ[ÀÆÃßŠÚF¹
+	ÖûB
+" àêñCe4æ:Ñ™±Z	epÄØŞùÂJM" `– $#ğ`4¯ƒÒ$¶RV•íğ›ûÉÈe·b™âªmmÒ`î52<„¢„Š	5öW@õÔÛÇğâªßúæ¹HC³csP³$ÊhœïçN’’ 	w?#½×Xé
+Xv¨H²ë§n¬*_4ˆ„ÌÍÉ–›^Jb-1Ô:HãZñ"6¶´Q“Ø@¬MÖbhá”
+6!Šá}‰12 <-!Z®&ÒAöXš"îÎ?#í@¨¦ ·³÷‚³êÌÓB¥å÷ÈÎ)uxj!HŸ(9l@’´Ë¼Yõ¯-$n• >¢j "Ÿ­ª£3•5ò‹PŸ/I—jù“·åŠı·yÂù£âe‘ş;3ÆóËºm\“É´–›Ä9°6gÁÙ**„klîø9éá¢Á¢Ha½ºiõ×±ˆªu¼c#å—1Râ£äT‚Úõª¶§€÷{Ë¡BúéwgÛ|İ‚€R68X³qmˆÛÖÖÆÄe0üUó	ÑˆË³àF·qÙ©Á`ô°Äe0Xâ2–¸ƒ%.ƒÁ—Á`°Äe0L\ƒUeƒÁ—Á`ô*q¹=ŒşG\b‰Ë`°ª|!a6›©¬¬Œ¨­­ßôE„ŠŠŠ¢´´4|î…Uåş‚ÖÖV:QP@&“‰{ñEÚÍÍÍTSSCC³³)444°‰(ªrIq±|qŒ‹¸Ñ†Âªr@ee¥uô…K.¹„‰ÛÀÒ–¡ ÿF NsÚÙ¸QAØ¸F õk70*ÕÒÒâ³¼GEãÇwıšâ‘#Ghÿşı>yæW\A™™™6çà1ß¾}{ŸR			4wîÜ^¯£ª×†¨ººÚwÄÀYÎ€T•}Ù™•§://ê›ÿ8§¾×¼víZªªª¢èèhÊÍÍ¥3fÈs}¡nªrôfÛªz!_¾³ÀW•¤‚¾œ·U¿öÏ÷rÖ¬YTRRB¤ÂÂBúâ‹/hòäÉš”Vç LS =Ò»wïv(ÑÔ31hà™NG•ùfddÈ<“’’húôéòWŸ×ˆ#äù­[·Ò±cÇèšk®‘Ïûàƒ¨®®n»í6ª¨¨N”iP”û¸OVpø©:ëë„únÛ¶Mæ NÊ“‹|‘~õõÅ±~0ôå;xâK\·PŞjüÚ?GuptĞW_}•bcciÌ˜1²ƒoŞ¼™jkkiÁ‚”““C;wî¤yóæI¢­\¹’†JS§N•¤<qâ„[É¤TËÈÈHù´@HÏEşÈeD^ .Ô]Ü«ˆššJááá²¬#ÏcáÂ›o¾I7ß|³$ıñãÇ5ÓCÕy£NPq‹‹‹ePÔÏNLL¤·ŞzKæ‰|&MšDkÖ¬¡™3gJÒb$¿é¦›úDâ;§ú|¹ğB›Âë¯¿®]+**’e€Z{ıõ×Ë¯$iyy9=š8 ¥å™3gd:¬ğB~YYYRÒ9’È_ÕM«„@°°°0I2\ßµkMœ8QÚãØÇ3ñ¬ôôt™åƒƒ;^ÿ©S§hìØ±r_å:$''Ë4Z9påÇ ¤Ê‰{`¯¢xÊ6aÂÊÎÎÖ2Ü‡2à><@İ‘F_/vN]Äª2:¯ É¬[·6mÚds-""Bs©2€X ËC=d“öüùóòÎı5HAûò+â _H8 >¾ãÿõ‚
+ÔuH_H>äµùÚk¯•Ämjj’ƒÈ°aÃ$¡0h<x¤©½¸G*-Ò¨g!_Ô¤UåDY@\LÃ¡}æÏŸ/ŸñşûïÓ=÷Ü#¥©º¿ê>E\}½XU¾ˆ‰«:º/ígüÚ?G©”úkøE».]ºÔ&­RY÷îİK+V¬ğHÊƒ*_¥ÚB†dRRR¤ô #-6¥z7NŸ>M'O”Òƒ4ª^¨ƒı±šÇ9×¡òÚ—Ká}Æù×^{M«#$¾ºÏT÷ÅÅÅu©×3ÙW06Ø„¾ÚT'pôG×öìÙ#íPH$HÀgŸ}–îºë.Ù™!y ^â<®/_¾\z‹å«ÑùaKâ~äÿÕW_És¸<ğÌõë×ËãÃ‡Ëë8§¦u”}";*»ı±~Ë–-’”PÇõeA9 Q‘/ÔbœWšîÃ³qßğáÃeQw}½|ùÎas!qc4RÍ—£·¾C»ºöá‡ÊÎzË-·Ècæoû›¼©të­·Ò²eËäµO?ı”>ùä§Ï|üñÇµs ì»ï¾+ó©¯¯—ûp½üòËòúªU«¤CLÏ…“öå¹sç4‚©4®ˆku/^¬å­Ê‚k<òˆ,+Îã9¨?®¡Ş¸ïá‡–®<Øa[²oÊ5lşéWÉÙ³ñO¿~ê)b0–H8`€ãÿH(Ş7_ŞŒşö*÷pd#ĞS¹ Ó!ÄP}!ğ`Hı°Üs“æ•?È @l¹óæÉe|¾œdø?à5G_`·Ÿ %5…]ò(­şhµ\€¯¿3.`A´®E7,¢Ø¸8¶qû°Àÿö;nç^|±#@?9ÌDg0úÑ0dO\K‡¦ÌÔe0úyƒiI®[à…†?ÂöØ®ølİÁŠSUUUKRRR7ƒá_8ş<BÏÚ¬\µYwp¢9ÿx>O~2~+75ò"È DlŒ(0ş£Õ«ßLHLæ¦b0üÕUÕ¦-º«¤¤ŸQ)[ş#’ÁjëëêêgŠ‹Ï^>uêôÈÈHş§×ÆFeE…iÙ²§~µgÏ<qxNlX”Ğj°ÿ	á})bœœœ<jÙSË5jTVvvv(7ƒÑ·(,,l=xğàÉ§ŸzúøòÁi±•‹­^€ä³’ßAÁ÷B3Ä–.ÔçÑiii™‹Å€›”Áğƒ[YYÙ¡§JÅVlU+¬¤…kV¶,ÜÌ­Öğ2Ã÷Œ…¾Õ"“ò‘#G^c2™ÌÍÍÍmöÖØØØ*®µc_ÇÄ¶0š\dgiii1555©o‹Z\=·¦¦¦Ù]º¾{üIJJŠêîı¡¡¡ÁÂL
+UyyØá°Ì°KÿP}TTT˜Ñht8ğ‡……‡„„°OÅ
+Ñ7÷íÛ·ÅJTµá“V¶“İËQ¶.œU‘Vé§Uœèi¹¹¹Ó¢ğÑ]ß’ª]H‹Çkkk3‰ãÕÑ[[[MõõõÍö¤«®®niÍ:BXÌf³EŒZõú~¤¿îdŸœ·8Éƒ<8O.é3âZvç<½ßĞ´}‰œœsV¾.÷aœ’’á,/q-Ê€à`@I¸İ€`ƒGÎÛ§UXppğÿØ7nÜ^YYY”u«·
+Ñ6êœÇuø’@Ş`«İƒ¬1bdŒ={öÈŒŒŒôÄÄÄx•¸¶¶¶A-¹BŠ‡6(©…óâX# “¹´´´^GÄv¡Ë×Ù‘Äâ€4Îµ»!š#¢xsœÚ)ÉCòöq»CZoï5¸86¸LÈÍ5Oƒ›Áàb1¸ºGhAYYYÑv$7ÄÇÇGùbŸ_rrr´½¦!P¤µ(bccå€£Ï•~şùçG…Wku@5X	ÛjÕ€Û]5¼¾ğJúÂö[„u³7:8Îfñ`#/®S7èŒŞÖİ1yø,_×Õ~OÈè)éİ]3x˜Æà"½Á‹ÃYİ3x00yğ<ûüÕâ§6«íÚdİš©sÎ¶İ‘Fgp£uÒWmŠ´Av°—‚îˆIİ$§§$s§âZ<$™;¢y“Ö—¤íI{BVO€'ıŒºAJo*C7Õwƒ§iƒ\Ô×¬#o«n3YÏ;4ÃØ0A:[÷îí©Šê©$ì-ÒYzXİ!¡?×Wùz˜o/)WêwwwåµèÈkÒ¶İ•ïÄ "‚t*·£J(éöÉÄõ„h½©Šúƒ„c\Ø¨§é|E~OÓZt$mw`ZvíĞ‚³îˆK:úRÊ1ş0hºqİ™ÄõÔª÷ÿ }ôĞcLì    IEND®B`‚                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  ‰PNG
+
+   IHDR   î   ›   e§P   tEXtSoftware Adobe ImageReadyqÉe<  *çIDATxÚì}	t\Õ™æ_»ö}_mÙ–ä]¶±±ƒÁØ$i–Ğ‡@:§a2ÓÃ$§ç„tzrÂœ“sf 3¤“&@¦’‡Á`ˆÁ† Á;ŞwË’­}ßwÕöúÿnÕOÏU¥’¬²¤Òı|®«ê-w{÷û·{ï“‰®†‰“Y—,şc&RPPˆ44òpòê’f$©‘°VNvrp²)ò*(\wÒº8rrú“[O`“´?Yc·nİšı‹_üâgeemJLLL0›ÍªK®¼^/õ÷÷´µµxòÉ'ÿË‡~ØÊ‡‡ı©5I\‹_»&<ÿüó›üñß%$$8T*(Ì,F_~ùåG¾ûİï~ŠŸ~-ì‘æ/4mÂÆ‹÷ìÙs€IkW]¦ 0kÈëÜ¶mÛ¦ƒÖúÉë”&r§ôãÇ¿RQQ±Eu•‚ÂìÂ‰'>^³fÍ7øk'§!9†YœTPP°Au‘‚ÂìƒŸ›I~®š%qaÇ§¥¥Å©.RP˜}ğs3ŞÏU³œ§Å”OŒŠ+(ÌNø¹ãçª¿¤ŸkUİ£ 0«aõsÕ$‰+_(((ÌbÅ+ù*ÉªVE)(Ì~ŒñTiY…9ªzqq"KÜşğ‡ôÚk¯<÷ÜsÏÑ/¼ ¾ï{ß¿g
+(û¥—^ROàØ±côÔSOQ]]]Ğkfz¼D=q×®]+„âÁà<ğ³ŸıŒ¾ÿıï_·2×÷t·a¦úÂ{÷îİ“ºçz—yKÜ¡¡¡«È‹ßqqqtË-·\÷B` Ns‘hÃLôÊ»pá‚bİ4 sB	œr8-Ö4m×t˜¡ôÍo~sœ	]^^N?üpÀk ‘abË‡Škqd‡™´}ûv‘€½{÷ŠkqÍÓO?=îØüc‘¯Ìa½A÷ßÿ˜Ù…üe™8.Ë  0ØpÎ< Ê—æ,GVœ“õ@ıp^æ…óh#„îG_àÜcÁÚªÏ¦šg víØ±c\¸®¨¨HüÆ9ô=Ëü¿şÙëó2š»Ğ¤ÈõA / ù#ù,ãEÿl=;c™Èå ŒÏy |ÙF”q*Ûh<ûĞVı˜ÄoÔ'ĞóŸV²šL_à*N-ÓœÂƒÓKUÙaÒLt:ôÅ_Sv9Xä•„czŸßqLOZ (óÖw&ê„‡ ë¨|8<ôÄ4j˜xĞ¸÷à^YgœCYh—>/£U‚kdyÈK¶?XBõÙTóÔ.yúÇôšßeÛaÎ¢™Â¸õ”DÃõÈ[_×PmÑ'<+™H¦vzÈñ€sÁ%îÅwù|P'}üCÆeäyÔÍØ~ä‡ñ-û Ï~²îÀŒšÊzsY\t:Ä
+ö ĞqR¢ãôäÇ}x¨H’¤zI§'ód€$…‰^úJóRêÊAhp lÜ'ë„zà"OÔU¶MR|7
+#Ùor É>°™¨Ï¦’§¨®×“ZZLúº£lÙvôÊ·=d²-™ñzˆşõüqì”ƒï²hH)Ÿò‘eË~–Ï_
+c?éë>@‘v	¦}c$)´4+Bù¶²“¤d3Ã½ŠÒOFBşè t“^Ú*ÑÎ@u5jµ`ù;‡ßòÜT}ÅP}6]şh°vEÂ7õ<ô.—ŒFKÁÈT6j^}Y²Fw@_—@}€¼ô¿¥6)ôçq¥t‡ù sa"3YvLŒ`•L¯¹õZ÷…ûàÃDÁ|µ`õ—¾°ôÁPW9`Œ]íµò`}6Ä
+Ô®É’,R€–‚–nC0ám’ú6á^<'hm½ÿˆÀ2/ıo©L¤0'£ÊúEcĞ|O#)q^ï@“èÒ§ÅC’B ¨?v-’< &Ÿ”î¦ºôm•\N¤¹-ÍNiZ!ïÉXÆ6„Óg×ªád» $¤ß9ÕÙ9È¯è¿`Ï"¤;#}ZßÀ1¸“Õç«ïgııú6HÓZ>ä‡`¬ì7Ÿl}gLãÊMD*}	•æ†Œê‘ì½ÆE§Js:”ö—n´Oš]úè³ŒÈŒ2@"ë¯Z"(‚(¯4µp}8ıªõÙTò4¶u7–c×B>”‹<‘¦¢¥Ğ¯ ‡>€*â/…<È„±"£ÓÒR‘Ïçd¿H­Œkåó“f¹„2
+{äE]"Uèt‚Âlœù&#(õn¼_jTõz¯KĞO©·^((L`fKkCº22“P›B šUjn¸ø~­î‚2•æ"ºrJAAA™Ê
+
+
+Š¸
+
+ÑU Œ0á¹^WÎı]ï3AÎ'^ËÈµ@®d’«ºfk?)âF1ôÛÅ°"Jî–‰ôäúµ`¢u»Shûdw((SyÖ@._œî¥k³ó­½JãÎC`iœ~ãƒ~C6´LH¹à]¿ñİx¯q³ıd6jMUù[¿Q]î°‘ktƒmL‡» ß)%Ío}]'zÉ€‚Ò¸3
+¹·6˜ßhÜRè×Ó7¾ƒÀú…è Şà!÷–ÊsÓµQ;ØFõPÓq­Ü·ŒsøDÙH ±~cúµlSTPwZ!ÃòyÀ`Öo¸ÆwlR @DR×€Æ7)ÈW¢€<ÆMë6jOÆ—ÕoT´‘_îXÒo™ãy¹éc®¿×K7ŠŠ¨zÈÍÔF¢ë´Ô’zÍ$µ·ş¸ä”™®ÚÁ–èMvcºñZ
+Š¸srŸi°/_&§÷Mo¯ĞßòÊâ]Ú“Ù˜.ß×$_ÌMèM
+ÊÇûõ®epGjY’ş²Ø*ÈOœh£öµb¢éú×¼ÈòqL¶Åhr‡İèÿ_`¼FAiÜˆ æ¦~Ã¼Œ*Ë-`2ˆ#5©|	4É1HåÊåfoIHnÔhcºŒ"Ë¨²l§ş¥ =ò˜ŒùÎëpfzÎl†Ú¤ 0WÈªv)((WAAAWAAAWAAWAAAw®Áë$r«~PPÄSî"oûiÕ
+Š¸s	š³´–#¤¹Ug((âÎSÙMÚ@=i]•ª/qçŒÆuÖ[C4Ú­:CAwn°V#l&­¯–L±™ª?qço‡šÉSõ6÷˜L™+T‡((âÎ	÷¶öCòV½IæÜõäÛ›¡  ˆ;»IÛr„Ü‡~Jd‹'Kù#ªCqg½‰Üq†<ıWÒº«É²êI6“WªNQPÄíæ±ëı'Xã&ëšo“µâ[ÜcW¿{@î"ò¸T‡)\7¨7`#íÙßëĞsäm¾@Ö•_#ËÏ9R>¿À=LŞêwHí!sş-|.Quš‚"îŒa¸“Ü'Ic/µ’uİcdİğßÈ—íÓ®Íä­z‹´KD±LÚÍdJÈ¨‰q¯‡?ÛzœÜÇÿ/kÛ#¼dİød©xÊGL¯‹<ç~KŞó¿å^K séWÉœ{#™ÒÊTÇ)(âÎ˜iÜq–<~L‹;ÈœRLÖ&óŠÇÉÄæ±ÖWÃøÿ0qG¦ìÕìï>Eæw©NSPÄQMÛv’Üû%M`sjY6ÿ3Y–>ê;×~šÜûŸ%Ï•÷È²ä+dİü2%«NSPÄAÊ²Û!ˆ©U¿MäH"ËúgÈRîûóZ¹¡…Ï½I–Õ_'ëÖŸ¬ 0Ó˜ßÓA^7y›ö“·æ"{"™—=J–O™,â´§òuNl:ç®ÓAŠ´
+Š¸³'›É'H,a´Å“µâïøÓÿng?i-‡‰FİdÊXN¤ÌcEÜÙc*käÉ›!Lå1eÜWOÚp›oY²{”HmWPÄ-­·“)}™¯Lş$a±‰ód1‘Ö{™´öj´((âÎÖ[Éœ¾Â§m½œ>ÿãVf6M‰E¬…cÉËÄõ\ÚA4Ò¥FŒ‚"îŒƒ5¬)u	Y7üyûÅšdòŒú5®ÌÙëÈ—N&Í+Xî}?bëÚ«FÂŒCÍãZdYù·äiø”<Gş™n%S’ï¯Î™l#ïåwÈ[½“L&“wkŞ7ÈRúµi­Â¥ÆÚõÙEê&»ÕLÛo(£µ‹óçt·;İ´÷ôÚ¾†â¶Àr“ÓÀˆ“Ö•ÒkÓ±ª&z÷à9JNˆåş&Ú¶n	U”î‡ÖîÚ}ô"«k¥Ì”Ú²jf$ÓÿrŠ
+3“ÉãÕè†Ò:SÓL‹s3iAn*Ù,EÜè_1d»ãr½õUrøg²Şò?ÈŸÍ¦r!Ynü¾x×”·f·˜2Ò:Î•NoñıƒtèB-µtõS¬İF«æ-Û]êr»©º¥ƒ>9YÍDŒ!/ÉéòŒ'.“³³oH|Ù¾®Œâcìt‘…XßĞ°è‡Ş¡QZV”ÃÂìjÂ½TO;™äM]}´ié&k
+Ìœgvj"ºÒLÿşÉ	jhï¥”-q‚¸ÊTF«9>‡lw¾HZç9Òê?!±8ƒMisÎzÖÈO°.$ÍÙı¹)=e‹ÿá&¹ÚÜïÏ±Vù^×eµ˜)•5ijb,¥$|Ò’âI½^/-ÎK§-«K„.6´Qsg¯¸_®ş!:|±š™´q;-áûÒ9€Œä.'æ¤³ pPr|9ñ£ë­%Jãê[Öj¡m½u5‹MXŒaÎXÉÄÎ#m¨Ìy§¿\p³Yn'ü
+­Àí°ZLäÕ¼TŸMmYC±l6k:åòx)…É­j6[ikÅb:t¾NScsû½#é[÷lG¼½gj˜Ôíœ/Qqv
+İPV(ÊJ‹¡ÛW/š;7=‘-—u¹‘­fEÜ¨€—Åxßàˆæ0åÌ~²˜‹n÷M¹Ø„a“ê‹&³9mYù2Ş0¿§‹ª›»èJk—ĞK‹²YdÌ{aˆşE_'Æ:hÅ‚\L¡	´€5%Ìæ—ß?,4òÇ«è6&ci~¦xF½üÌ^¨c·Ÿ}g;­gÿxiQ–¸×ÆäÏHËeªàT ıJs'µõŠÁÉ\‘Ìæ”ÃçpIMñÃ‚Àšs€¼½WÈR´•Ì+ş†ıÜ¤€yCC
+Ò¾ÒBï­¤åÅtïKÅ œôsşıì÷uÓĞ¨Sø›•ÒØüÌçv@kKŒ²?Ù7Á¤	s4!Ö0ßA6M}ù±œ²[ù:çåë·ùp™Ü¾ş‘QuzD_A»$IqaÕÁ¢anÁê Ëå¯/+ ?~z’<¬©‡œôöşóôŸïKÏëxU#Õµus}İ´±,WhX´mŞ…e¢½ÕMt¼º‰ZØ'ÊdhaNKg3ûEñ”’È&Z W?Ö§-MŞ²ä.%Z|'“6{\¾ .ğ¯âØŸ*gÉ¿ba.•°ÖøíÇ8eâx…‰h³N-¢‰Á~¾®N]n¢†^ê¡&ÑˆÓ)ÌÇx&YFbœ@·±¸¼8›5“™z‡éƒçèß›ç ¼ô$zlûza±çX%­l §ÛMk—Ğ×6¯¦Ÿ¾"üÌ.”Ù;À‚c„¯ñ
+‘É}‡èï|=üÒ$&òtBènÖºoî?MI±1\jºgCå¦%ÒÇ§ª…¶Mã6ßÊå.ÎŸVMÔï×»>c“ë’Ğ|m© Ò‚&š]P µ†Ò°şAs‚œN·‡†=i¸ÕD#Ãõ4ÂDu±–%7Ÿ/ÎN~šÄŠ9ôøİè¿¿º‹v½D›W.¢…ÙS‹jBÃ¾{è<½ş—“BĞÀ´Ù,ì³™ÉãÑ¨±£‡.j&şÎª¥“üÒ&aV" ƒˆíŸœ§ôDhÆxa‚eß(áâöÁ§üàx¥hO"ĞÌÚÓ-/±¹ZÓÒÅm‹cÍÎe²°ƒ"aß³¡½‡µ±—TÖqŸ¸éKlYÄ9làÂLÜû6-£ÃëÄ„´ñÅú6aIlaM3Ùd6)âF#`ÚÁ”ÜX^$FO5›Ê¯¼ÿ™ĞTĞğ›`%ƒ²&ßA\ñÍL×L£¬eÜîQñÚ,ÆnA–¼ôdZÀ„Œ`ª%ÄÙ)+%š»úYKcbJõ‡éZVIÛo(ó	,pbl6QïQ&PeS}v±AhÿãUML¤ZÌ¾5„Ôæhß¹+ÂLEÓ.5uø¦Mtc½µg@p}u8¸=işrmtÓÒb‘ œ¹\+X½Lœ¿œºÂB£—ïï§?>'"»kBÌ=£oí¶ğ­|îÛ¿Ú¼Šşu×!JdWfßÙ!L!4 ‘o[UÂŸIó6võÄÅ`BjãZÓÚEµm=löÒ0ûtğí0¨¡9 ]-Yx€a¢ŞÎätX­ìWY(¾\re¥&Ó:=¿¾4L[z˜©SÌÜûo^N÷ß´"àÀ¿[+£ÿùï¦ƒêÉËæ-Ü!nüÔ&é"6ÛO°™mcb^f—akÅ¢qúuìa"Bóf¦:('Í÷Ò;|~çË7s™‡´øË, a¹€üUœw0âBÈÀ??[×Bñv»ˆ/øüg/ßo£ÜÔ$!ÇİcöÍí~|ò2]néÂED¡YˆŞs9m^^"„¨"n”ÚiCYQÄË‚)·ûÈE.ºƒı0”;UÀœ·[ƒ?&bUI®i¥6öı†¸Ì!r­»’Ïcÿ9­mA½I“DG`*›¬ Á)KˆàİÈÌ®Ï.PKwi^ûúîàš–ë_ÍÚş'¯}Hr.Ç»Ø”_Y’K÷ÅT^˜uõà´˜hÅÂl
+íÂ7wy<Bû®/+m>cŞMµ³vØw¶–5¬‡¸eåØ4P(H¿Zš	&34„%@PØûà©jdÍ°‚MÜòˆÜ`)h~Í…àê"§^PWé+®bb Œ{=_×J‹òÇ¢Æõí½"¢lf’e¥Rqfrà>nƒ¯|ÅjÂßö-´ĞBÎ=ãîu²ĞĞtÄ…ï
+sßdù7â}Bèà>;[Bğùá“—d§SR¼Cw> ƒîÏ'.Ñó;öÒæ•%TÊ¾c›|Ğ@ğ%ƒşÖÜö;©›µCSW/›m]ÂÏºoÓrÑw1ê¥—w¦£•õôø]è&®yšSˆ%ƒ¬q«oë‘UDy±çá|};ûàn±ÎÙˆL6ëÓ’bY3òa:‘o‹Ù"ú£wh˜œNûév*bÓ:^7÷	²`:‹$ ÍÙ_ïì ‘72Ùa"ÛX"¨\èi"ÏîÂúòBrX¬¾)*>Ë ;-2Sâ<+*Ú¹¾õbî×+¦µÌ¢¼÷Ùš)/Ì¤[ùFËbEÜ€VZVœC[V/¦“Õô÷¿Ü)¢¨I<Xcv9•JcÓ"ı##4Èä…å`ß~.‚99ìób×8W+¦eşú¶Õ"4]€/xêJíØw†;¤!®´ğj¢î˜µÁ5,tØlT˜‘Â¾lw°ÙÜHµy%9â„¯ÀÙ ÓI¥ùY´ 'mÜ½ˆJ¿sè,¼Ü,Q˜e!Veb.+XàyF!Í7[76ıõæÕÂ'ıCÂ‡ÓOLVDå!|d½°0£$7}ZûYwc9÷¼ƒªYs­i¡:6Ûzú…‰;40*È
+-	ó3–Iš•O¥	™”›@…é©TÀ¦$!‚*V6İ QêÚz„V{tÛ:±šÇ2S¨Ï‡l%üêİCc‹.U]¼´XÌß¢¼ªæ±8f¼IqvZÉvïÙ+"ğÖÈí­jî¢–Ä±ïØA]ıÃäry©„I‚¹½¢L” üÔeÅY"ØAíäbƒĞüš6‘Ÿî³v¼a.ÁFlà£Ut®®-+Å°@zêK7ÑÿgÁuğ|­0ù/5u*âÎ Z	spæ•r Ñä¼­ˆ^bİ°Ùg–ùüG“ú8†Ïñæ¯‰µ•oÀTY„Â.¿cŸZ‹a¾uE	k»XÑÔæuK· ¹ÑrŒa~.îE;D:y¹I,œ@@4øªI”á7YaÂşùD5}tªJ¬V‚KñèÖu¾…+XKmÆ¼±‡Möö‘{hº­UL¡í<tNX@Ü¼V,…|pK…˜¨mí–ÂGÜnLCÍGòÎÛµÊ}ƒtúJ³˜È7]ãÎ‘HVú‡ F=›©Xà~yÓŠ«:XÅ>S-`+@*,K\ÂÂå8›É zgïu‰é!L‰!B›ÏÚVÛš;ûè k6¸é‰6Ú²ªD”­X£®Èl†€àÄôU#·nLQN*m_W*VºañÈ-Ë‹E€æ÷Éê&Úw®†¼­Bw> sºÿòÎ:UÓLİl*BbcÍ¯ƒM0ÌİŠñÈÉÍwØå¦®ëæÁM·zQ˜â±D80âòûØÔ`:Kş­NÂü3|I-ˆÍŠímĞ°G.5ˆUWğU?9u™ÚØÆôÑe9ãü[Ì¹¶õö‹(.Èœƒe¡†¶Bú×«y·ÌÁ‡ï³ây ÿ{7,}.#Ñ·°µ±ÿ\­°°bëÀùZS’Ge¦“q£­ÑL˜‡5l^şòO)™5ÀÃ@•cş¤æ³QTöG\Ã×¬+- ‡n¯;€"3`£.0MÀ‚‹C¬!\Ğ†@ÜÉ°9	0ÂÂ ZÂBíİÈşr‘ŞÜÔüoè1ù¶İµôô_•'Ö7£>ÓéÏcî_X \jl§$¶0°ÈcÓ²ãLqÄ*ç‰6`GV]k¿Ü<¿‰«iZÔ5[÷…Ät%`ùcş´Ì1ÖBu­İbºÅ$?º=!VQY-‚äÈ”æ¦Ó¢¼*/Ì>ãtõ—ÈGäåK^ÿ-ö"ÿdìAı{0	ó…ğ©åzï>RIgêZÄùhšvUİ2“ãÙGM¥óõmÜÖÖXšH³Sh ˜¢ò¤X»X-†Åä¡ON^¦´„8±ıtš-•wk¼1&‚b†25{@:ñ×K¬6û˜}káGóï›–‹ÈµşßZ±„Î°›s¶¶E¬sü½cÍb&zÜü$n4ù³ÊÄ€”.@ÄÔoÚAËg§ŠtËŠÔÖ=@£<ø¸‘Ä,¾Z‹ëA¼ÁË­¼»¨ÈIµm]b ç¤NæïæúºÜ³
+ÓpIA&•s:_ßJƒv;½öÑ16s«Å ®ëèuÁ:ìËÍ]b6æW½ÈÍX˜•JŸ­ÑräWÃ|uó*`ã×Qç¤%Ñk–Ğ…†6jë¤^&:Ha×Q›³X†Í|xÅˆaåüó¡·Øë²‰ÕY'-ÂŞ3WX{6
+á
+bãB `}8^WSÉšÑïÃ•u´óÀY±ûIwb`dTø@{\äAì¢mkKÅJ¡Lİk=0µ“Ÿ<-e#j‹İ,XèÅ÷7/_HÆŞ·šÖn±[·‹Íøß¸k=½½ÿ¬˜KÅ‚æî~ás.ÉË¤/l(/–ûã'§„Ä’E{€­{ˆ†ciä‰ªFaE­Îì¿yùñú=P>ö¹â]XŸ¼"V8°«ĞÇäÂ&‡mëÊéÑ­kÅÜö¨p,”nè_˜÷˜J[ÊÖ	æ¾Q¯P1,rA ¬,?S¼ü5;„ĞÃ’ËKMít±¾]X&­şå¡v()âÎb`ïí‹;÷‰º¡¬P¼6¥‰<$:– Â\Æ¼äTW4ÁlÃ´ËˆÓ·zh€µ%xúˆ9K.$)f‡é&l¿µ¶æ´ä¨ØÛ/ÌR	˜é7±Ÿ‡Å0.¯°@>DŠåT¶Ám\Z$öÚÍ¼fQ%}ùfBÂfS<€¾úúëhõ‚<jg­ë[ídâúÅÒÒâñæFôÁ×ï¼A¬æ*4lÄ¦[W.SI qR\¬XèŸ/¬/ok„¯nÜ~h¬¨GîX+Ü “piÌbõÚ|ÆVÀçpZìñxvÍõaÓ9Şî×ÂÚdÂ´V4!*›ÁZ [ÔbÂüµ‰ ”/BŠ9[Ig¯ôy€û¶õ¹±Fü*D^AÜ§GDŸA¤Ìä8*+È¢™@˜ó…?ÙÉƒ/.CùÁğG®ïûÎRC[7ı§ÛVÓßÜ¹Rç‘¿¦,Ëø£
+1É¨Ó¸xÿĞ¼ƒjZ»Å\`Swû`Â×‚‰‰mlã}1[&(æ1M>ßV,ÖÇş[Du-qÌ$VTù·ı±ÖNg¯¤0±yWÄ  ûb+:ÄôJ6åJÙœ•[å‚+„Dƒ¹YÁZQ‘Va^§0ˆÍçHã|I¼ÍÂå[k‹H¨OcºÅ¤?LGñé_ /—ùŒ±16áŠ³Å¿‡|ËĞê`sí³Êz:WÛ&–b
+¥4?îZW&"¶¡€í'ª›¨hXìVZ¾ GJ…É7§ƒôğmøîA¤D6•ãcí"ƒh)|$‹ÉìŸ
+òMÏx4ß"aÚ±gÄ)v A{w±fÅ
+ñâ6—XO[À>íöµKè†Ò"˜	§O{ØG†™@Ó¶5KD45ÚŸƒÂ4û¸n·{W´7QgLÿ`S´¥XŸÌšÓ%´§GĞ·MÍ$´ª[ì¿õŠ×¶@ÛÚÙ/ÃÛ1l¾·&bU’o3nÊK ±¿ğ*–ùºMM!-kµF¯;”JÈu|>£¨]åñ†)ï®ú˜26”‘â«‚2•#-ĞÇµå¨º^aP;HAAi\¥q”ÆUPPWAAAi\¥q”ÆUPPPÄUPPP¦²‚‚Ò¸ªGæqU((Ì=âª•î
+
+ÊTQàoÛ´¶¶Òàà ¹\.õ¤çl6ÅÇÇSvv¶ï¯<(SynÀétÒåêjñ7cæ ´GFF¨··—J-"»İİÄS¹©±Q<8…ùnŒ…(Sy. ³³SH]Œ…ââbEÜ¹ ¥m$ßˆÆiNƒ„« mã:„ÆFF,ïòòrZ¹råUÇ/\¸@§OŸH™›6m¢‚‚‚qÇ1?xğàuR©©©tçwN{e»>øàêîîq£p–3*MåHf©>~ü8;wîº´ÇëõıMœ]»vQWW%$$ĞÖ­[ióæÍâØõ07e=¦³oe»$ŸYô›ÊQÒÀHÎÛÊÁ†Oc9ˆ^nÙ²…ššš(//jjjèã?¦uëÖiiyÀ4®ÇµÀÑ£Gj4Y&„Ê„vºxñ¢È7??_ä™N7İt“øÔçUZZ*ïß¿Ÿ*++iûöí¢¼7Şxƒúûûéá‡¦ÄAqÚºá;î“Â
+?Ùf}›ĞŞˆü ´IFr‘/òÀ§¾½ø­†‘|fQO\RwBÈh5>åÈú«_ıŠ’’’hÙ²eb€úé§Ô××G_üâ©¢¢‚>LÛ¶mDûÃş@%%%´aÃAÊË—/O¨™¤iç{;	¢\ä¼PGäâÂÜÅ½’ØYYY#êZ]]M‰‰¾¿o„…¯¾ú*}å+_¤¿téÒ˜ë!ÛŒ¼Ñ&˜¸¢MhÚ²ÓÒÒè7¿ùÈù¬]»–Ş}÷]ºõÖ[iñ$à®‹Æ%œšˆäÂI\^$‰_ÿú×cçêëëE`ÖŞsÏ=bàKMÚŞŞNK—.¥3gÎmÙĞĞ ®Ã
+/ä·páB¡éiä/Û&‰‹UB ˜Ãá$Ãù#GĞêÕ«…?ï(eåääˆëPØjõ=şÚÚZZ¾|¹ø.ó@222Ä5CCCcõÀ9ÔBHÖ÷À_E=Pê¶jÕ*Z´hÑ˜ Ã}¨îCy ÚkôíRÁ©yl*cĞE
+ĞŒÀ{ï½GŸ|òÉ¸s±±±c#Ydyê©§Æ]ÛÓÓ#>œÑŸƒ4Ö_ùBÃ))¾¿"H@ÈóĞ¾Ğ|Èfóİwß-ˆ;<<,„ÈâÅ‹¡ 4Î=K………cf/î‘D†I‹kdYÈíie=QÓpèŸ»îºK”ñúë¯ÓO<!´©¼Ÿò>I\}»”©<‰+z$ıg|Ë‘&¥ş>Ñ¯?øÁÆ]+MÖ'NĞ+¯¼––1d¾Ò´…)Ídff
+íÀ4ÆµHÒô^±bÕÕÕÑ•+W„v‡@ù¸F¶m0ş–óâ8"ã<L^c]°ÄÑgé¥—ÆÚ/ïC™ò¾äää«Ú¥ˆÌÆFC‚O©$A r;vì˜ğC¡‘ úÓŸÒc=&34ÌKÇùçŸ^D‹ƒå+cğÃ—ÄıÈïŞ½bàãÎ#”¹gÏñûüùóâ<!¨…iéƒÈênü­ÿ¾oß>AJ˜ãúº Ğ¨Èf1KK÷¡lÜ·dÉÑf´]ß®H>³hH!4ntH#9Ğ")½õ:Ô¹;vˆÁúàƒŠß Ík¯½&ÎC+=ôĞCôì³ÏŠs»wï¦÷ß?h™Ï<óÌØ1ö÷¿ÿ½Èg``@|G€èç?ÿ¹8ÿÖ[o‰€˜ÊEşe[[ÛÁä5¡ˆk<‡6Œ?şøXŞ².8÷ï|GÔÇQÚsh7îûö·¿-ÎìK›
+qf³©¹9*şÌæ?ıèG¤  ñl”Œ‡¼ÜÜÀf3Z¢o‘”Ş
+s*ª<G v)D{p**``šCíRc!ú`DIû°Üs“
+
+˜WşMQâÜ¹m›XÆÉ¹A…ÙDÍ1”;G™•IO÷iÚùöN± _.~W˜À‚X]÷Şw/%%'+w.üùú#jÏwDé+‡ÕÑæ2WóYÊŠº
+
+s¼fIZëÔÂ…Ùÿ¶G¯ä«Õÿ+Ü]]]£éééÕM
+
+³===ØzæòsU3û¿àÀHÕ¥*5ù© 0áçæy±ÉÀÆ	#ó+ßŞ¹óÕÔ´T«ê*…Ùî®n÷}÷ŞûXSS^£ÒÄ©Éä÷u-ııı¦†ÆÆæ7l¸)..NıÑk…FgG‡ûÙgôÜ±cÇóÏ6NX”à¼êO™]ºt©÷Í7ß<–ŸŸWb±X’ÒÒÒ,&?»URI¥ë“jkjœû÷í«úÖß~ë''O<æ×´xÑØ0âQ&?_A`¥°7ïAÁûBó9å°ù¼4;;»@Ó4’’
+
+‘ÉdÒZ[[Ø,>Ï‡Z85úIÛÁiÀïçz¤/‹0³ÓQfÄ±Ğ·›3i/++»9&&&.:Çív{FFF\Ærò9/¾Ëã˜Øf÷a8DvÚèè¨{xxX¾[TUnooïÈD×]ë³ÇéééñS½ßn·[ÙM²Ë¼ÂpXfxÕø‚>>>ŞÁÖ[@Áïp8¬6›MÅTüà±9têÔ©}~¢ÊM;èç¨—GúºVÅùµ/‚VÉ<²·nİº1/İ,©¼L ±ıx.—ËÍ¿Gå@w:î#éº»»‡ùZšÇãÑXjèÇ‘ş|ïà¸$
+ã8…(3bÄÕY\4î›Ìµ¦ c‰‚V¿«îaeaÍÌÌŒ–Ÿ‹7a ,HbÁÄÂÃŒãÆëYP9¬VëŒÿìAÆ‡~x°³³³(ğ+Q}>ğ!¼h°İO`5‘%cÒí·ß^–ŸŸŸÃ~oŠ¼¸¯¯oP.¹Br¡ƒRká8ÿ#“ÉÓÒÒ2 #¢·¦¦¦ß@- ióN@´@D™Ì1
+Bè`¤¤0É{½ˆ;ÒNö^Sˆß¦Â„&8®@0M L!„ˆ)Ô=ly˜.\˜` ¹)%%%–õ—Í˜_FFF‚ÑÒ`ÁcÇµFA‘””$üİÃ¨¯¯oùè£.²×ç@ú	ëô[ÀŞP¯¯¼Ô¾ğ}c8Åú“ÃÜ@ã#˜F¢Iœ§)p"2N†´ı¦0ËŠqC}¿2†Kú‰Î™Â¼ÆâzÓ$ÆDdè˜)Á`£<cşrñ“Ëï»ûÓ}>gëdÑYC6¯Ÿéúœ:Òš0jÁ‰ˆIS$g¸$›ÈÄÕÂ$ÙDD›Ìµ‘$íTHz-dGL”Ÿ)sİf='KäÉháÉ„@ŸæíõèÈëÔ%w0ÒNô€ôš×â'¹ÕÿİàŞk5QÃÕ„ÓE:mˆ5ÎFâF*Ó5æ?]Á4	!ÊüŠP˜¨¾š¼nò„"­ÈHîÒ™Ü!	lÖ}§ 7¢M§):4œÂÌ
+ k½.Rä÷ZMGRo ×òêÍœµ†9èe¦Á‚×SË)ÌhÓ|İtÓÎÓ¸áCÇğ ¦Æah”×˜    IEND®B`‚                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           INDX( 	 ·k            (      è                            Jò    h T     Iò    €Š_êWäÔ°Ú_êWäÔ°Ú_êWäÔ€Š_êWäÔ `     ~]             	d t j a v a . j s     Kò    h T     Iò    ]'`êWäÔÁM`êWäÔÁM`êWäÔ]'`êWäÔØ      Õ              	e r r o r . p n g     Lò   	 p Z     Iò    ¾Ã`êWäÔê`êWäÔê`êWäÔ¾Ã`êWäÔ 0      &              g e t _ j a v a . p n g       Mò   	 p ^     Iò    b®aêWäÔ¬ÔaêWäÔ¬ÔaêWäÔb®aêWäÔ 0      E+              g e t _ j a v a f x . p n g   Mò   	 p Z    Iò    b®aêWäÔ¬ÔaêWäÔ¬ÔaêWäÔb®aêWäÔ 0      E+              G E T _ J A ~ 1 . P N G       Nò   	 x d     Iò     qbêWäÔm˜bêWäÔm˜bêWäÔ qbêWäÔ 0      i,              j a v a f x - c h r o m e . p n g     =ó    ˆ v     Iò    ecêWäÔecêWäÔecêWäÔecêWäÔ P      ÖE              j a v a f x - l o a d i n g - 1 0 0 x 1 0 0 . g i f   Aó    ˆ r     Iò    ä5cêWäÔQ^cêWäÔQ^cêWäÔä5cêWäÔ       	              j a v a f x - l o a d i n g - 2 5 x 2 5 . g i f     =ó    p Z     Iò    ecêWäÔecêWäÔecêWäÔecêWäÔ P      ÖE              J A V A F X ~ 1 . G I F       Nò   	 p Z     Iò     qbêWäÔm˜bêWäÔm˜bêWäÔ qbêWäÔ 0      i,              J A V A F X ~ 1 . P N G       Aó    p Z     Iò    ä5cêWäÔQ^cêWäÔQ^cêWäÔä5cêWäÔ       	              J A V A F X ~ 2 . G I F       Bó    x b     Iò    ÚÒcêWäÔ˜úcêWäÔ˜úcêWäÔÚÒcêWäÔ 0      ø*              u p g r a d e _ j a v a . p n g       Có    x f     Iò    _–dêWäÔ_–dêWäÔ_–dêWäÔ_–dêWäÔ @      W5             u p g r a d e _ j a v a f x . p n g   Bó    p Z     Iò    ÚÒcêWäÔ˜úcêWäÔ˜úcêWäÔÚÒcêWäÔ 0      ø*              U P G R A D ~ 1 . P N G       Có    p Z     Iò    _–dêWäÔ_–dêWäÔ_–dêWäÔ_–dêWäÔ @      W5              U P G R A D ~ 2 . P N G                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        ‰PNG
+
+   IHDR   î   ›   e§P   tEXtSoftware Adobe ImageReadyqÉe<  hiTXtXML:com.adobe.xmp     <?xpacket begin="ï»¿" id="W5M0MpCehiHzreSzNTczkc9d"?> <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.3-c011 66.145661, 2012/02/06-14:56:27        "> <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"> <rdf:Description rdf:about="" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmpMM:OriginalDocumentID="xmp.did:0180117407206811822AAC76958E5BC8" xmpMM:DocumentID="xmp.did:2A453F7ECA1911E1BD44B357DE6E58DE" xmpMM:InstanceID="xmp.iid:2A453F7DCA1911E1BD44B357DE6E58DE" xmp:CreatorTool="Adobe Photoshop CS6 (Macintosh)"> <xmpMM:DerivedFrom stRef:instanceID="xmp.iid:04801174072068118083A116E2A2553C" stRef:documentID="xmp.did:0180117407206811822AAC76958E5BC8"/> </rdf:Description> </rdf:RDF> </x:xmpmeta> <?xpacket end="r"?>
+‡§  (—IDATxÚì}|UEöÿyé½WJBĞ»T]ëêZAA]q÷¯®ëîºÖu×^ÿ\Ëº¢,(*Hï½… ¡$Hé=ï7ßÉ›û^Ş{y$ğçËç’[æÎœ9w¾sÎ™;sŸ‰êÃ$6Ãæ©3ƒÁhn˜µ­Zl5†ÍlMRkÂz‰ÍGÛ|ÅæÍäe0.8i+ÅV.¶
+m«2Ød ­§FVÿ1cÆÄ¾ûî»¯ÅÄÄòğğ`•2555TXXXtúôéu3fÌ˜µlÙ²Sât©F`Ú¬ˆë©Y× ×_}øÔ©S¿
+
+òe2EEEåüñm?üğ*jV¸Z¹¿°´Aƒj»dÉ’u‚´>¬2ÃmÈ[1nÜ¸Áë×¯?ª‘·B¹Èb‹Ü¶mÛ'½{÷Éªb0ÜÛ·o_‘šš:EìæŠ­DÃ-ILLÀ*b0Ü7C4®z(âÂ5Œˆˆ`1î›W=Ô{Z¼òñãÑcÃ=¡qÓOãª'TœëÅêa0Ü^WMŠ¸jòƒÁpcÃ«øªÈÊ³¢÷‡ÎS¶²Õiß°Mfzæ¼CdÎÙÅŠ`0q[<½©:c	ëÑhğHò…DQ&÷•¶¸-ÌQ¦šÌµD~á¬
+·¥ æèR2 ˜^¬·E ²˜ªÖ>C&am=ÚŒa}0˜¸îï!WSå/“9?ƒ<{Ï òòc0˜¸îíW	ÒÎ¢š#‹ÉÕ<{ŞË:a4	xT¹¹P~*¾Ÿj2×É?’¼Ç(ºIV7ƒ‰ë¾ŞñÙT¹è2%ò	"¯	Ÿ)8Ñ2Mi.ÕúÈÓ—<Ú—äf0˜¸Ë;N_@•+%ª*dŒ"o6¦waOï êİs¨&gyyŠ<‡³ÒLÜ‹hg©jÃ‹T½íydŠè,H;G·´°¾YÆk!Ï^ÓÉç†…µåO{1˜¸ÑÌVRå²‡…ëû½<ôh3Š¼Ç¾#İd z÷§TµîY¡mòø9[Y×,må²ßÒ.¬%mûÉ‚´o
+“ëYk…W=IÕ{>#S`y_3—L¡íXeŒFƒ_5Õ;şicû’÷˜×5Ò’t›AZò
+ ïÉÿaÒ2˜¸nª2ªÚòª¦I/ò-ö=¼kípñ)ªÚôŠÜ÷ì5LaX_&®[8Ég÷UÕ*2é*aQ“êÂŞ´oåy-~+‹ÁÄuxÖıJ‹G\?KRç©Û/È`]1˜¸îSD'2Ä¨#Ë‹†	Õ;>ÿU°ÂL\÷`®gíÂ¸Æ§¶Z*6a¨ÁúfˆXø5Öƒ‰ë6Şr·;ÉÕj,"siNb‡ÉóºÕİö6Õdob…1˜¸îÁ\ò÷¶\®W½a¶Ñ“÷/Õ-,0×PõúšE„¾ú…îxé+¹ıeÎ"~&L\†Ssh²œ“\¾€j¯¬;İƒ¼†=§×doi–òË**©¤¼Bn¥•ü@˜¸§×_’·jõ_ä’>İ w½<bRk‰Ì+€L\7TfÂPòñ"Umú—¥EÖ^yvŸÂJb4	x®r#P]SC•U5äçãeA^“o™‹2É”PŞŠ},,ğLi7¯¬ÜÚv(“ŠJ+($ĞúwJ¤¨@V2ƒ‰ÛÔ˜Í´'#›¶Î¢c§ÏQ|D¥´¡IqõÔhŠê¡ï›Ï¦‘É;¼F¿n÷UÕtê\!¥¶O Ã'sé?+·ÓœŸ7ÑícúĞä]›DşJQFZfeœ:K¹%òØÓÓƒbÃƒ©g»8Jˆ
+µH$û,É/Öû‰ÄÃTÿç¥ŠÊ*hïÑSúqÇ„(
+ò×‘ÇgèäÙ*,)—zò÷¡v±Ô§Cùxyêi¡×ÂÒ2Š¡œ‚bêœ-ïÅ_×%””Ñ÷Ó’­i²Ñİ9¶İ2²7y{z:q·Y0¾‚¼FıËæU&+*£V‘!’´ ö{&ÇÓ¬÷¾äİL¢ÕpŸ9G_ÿºƒ6§„=éÚ¼fùz×6‰ô¬zï‡õúõgïO]ÛÄÖ»o·èÌ^»B?~íşk$q¿ß°—–n=H'ròí–ìïK3'¡[ëçæ­ÙM3'¡g¿XJ¸a½òÍJúòO¿ã†ÈÄufAÔGÎ—Éã˜° yîøé|
+ò£à ßz.¯¬¢ªê9º[,ÜŞâòh*ØL´TZºÜÂb:•WDgKhx÷$ºnH÷zå†øÑ°nIôÃÆ}´ñÀ±F–kíŞ£d	ğó¡r!Ÿª°voy	üğo†ÉãşZÓû‚¸fíúÆıÇm÷Ä™º8„Êr¯ßwL'­§‡I9@ZxÔ»Rë@
+KË%1_6‘ÚÆ†S›˜0¡WŠ	 ş‚Ìïı°NZz×%˜„køä­ciÅÎCtP¸™YÂİ{ûûµ.åá-\ÁÈà 
+ö—îu’pÇôîHZEêÖÍ¦k.âg3›7~˜’C£{w ~©‹ ^H€¯…kúêÿ~•U»ÓİãúQ¨ˆ±A Nš«
+lÈİWö«O\ƒEm©»Ó£{Õ–Ù+¹•$%È+]öêjZ´ù€ô&Ô8ÁOâøş‰µ1Æ¦v”¯BWöí$;×e$ÇGÈMEÃƒ{ºL{gZ^Y-­l€¯·´*~‚ˆİBEãòsıó4°Úë…•V±ecà/dz@¸£¶ 7cÒ`zâãŸ”c/bà<A¶xy< s¸§ÏÉkíb-BåˆÉ:´ŠÒ÷Ç¤Ú^Æq;\l¸ï@†ˆ§º´®ûİÑƒ‰Ûh áÁ
+€¤°0Ío¢<áZïÛ¹Ùf’ã"ëu
+ˆ=?[V7idƒèLŒÄ…«‹Ñp[®´=$ÅEèÄEgÈpì‡¸ˆÿ¬ØNÓ_ÿFÄ·®ÿ"¬òQaµŒä°pEüÒ.İv&êJÓ&hşÛ+Š2ãh3âm#>(xzxP9ÂîdB&nLlq/Ê*ªhşÚİ".3Ó¬wÈ×AHÁ`’õ@U™ g~q)—Ë©gòé”p71¸Õ::Œ¦ïO=“âõôxmòæ‚5Òı~æÎñÔ­ml“Ë‹¹5ı²ä–P¹8×µƒÕıŸÇÂU†ËŒA:`çá“u.n››1;^+ap,-³ö•Piy•Mg0q/0j:û‰’¼ÛÒ3iİ¾£.İw¦ÉÂEá1º‹˜#¬Ë„…Í.ç­#{K45VïÉ m”q¹«Ä]³ÛÂ]†7 à¶Bïö­,î+.« w®£õ.êˆÁÄm Æ›uİpi9³ó
+)3§€Î•ÈÉp…|¼=%91:H±aÁ3¬Ïø~mNnh
+¬¤}uŞ¯úqß‰4¬[;é‡hîşŒ7çÙ½ƒDx/‹˜[÷@-qs„‡pÜğ*h@§ºw±)şûç?Óá“µƒNĞê/""8@Ü-Ü°O¾îb0q/(ğªSñŠ§1pôJ¨±¨™7êÇ×íN·îãr=û	Rb
+°ÿø9[jcÚq=Fİ±ğ/ÛÓuÒ	Ò¾rï$Š
+µœ¾èÇƒçÁ©L"øç·+i©h Î–õB/¹ËÈÎ³˜dquÿ”óÊÇ8³	õH;q†Ö
+K®€É"Fl?TçBË9×¡<çš-® n\Ö‰m¹ o|D0…úËÙT>^µ*Å O ÍYábfæäË1íU};ÓÄ]¤ûÜÜÀ¼_#0¨fg^Å`´ØßÇ[ïxÖìÍ–÷t­E¶A\¼&rT&`+LÜÄxˆï¶¦gÊ	ÆI1b€Ÿ7]?´G³Ï
+
+±zeµbÇ!ºiDOırcZaCÀhyj‡VúÔÉ•"³!fÆÈº½ra}1İ3L[x€Á8Ìc^°n7$&nó ï[1sHS´ÔN‰QÔ­mœ¬yòÖ1”}¶¶¤Ÿ ô¬\9.4¬’zGè+Ó&F…ÉA­6VáØ¬ s‹lÌ°ÚSA˜sÚÀÒW+·Ó–ƒ'(&<HÎ—ÆB/‰8ñ°cw¹N\cÊIÂ{°F˜Õˆ;F²~wœn‰ñ7¬$BŒÌS™¸MîğÎ#'iT¯ötEdùîÕqÂE8 K“—¿-=K6l,{sX¬€]ú †`ÊÌIƒéå¹+u—ø  ëA°˜4qíànÒø|ÙV‡eôí˜ ç]_è¤»á]´tâªXDİdÌJŒ¥ß_;Œş|‰|mÄ`â6_­ØNsWí”û˜ã‹	ú
+r´vÿ19*ûà5C¾/ßğ~6&,ØŠp‰ô¯é“ål¬ÃÙg©HÄŸa"OiM#{¶—GXdPQYKì„HÛ£ä¾>4mÂ@Ê+,ÕÏáõ­—Xèà‘¬Úu„6&¿Hz!x…Áª)mähõm£Så¼ï0Ãú]†s€Ş1sÕ:˜ÍæŸ.w…L{u®şÎÀœZLºÇªXaañ>Ö¸ÂÆU ÆÃà–ÛÁ]ÅL$¸Ù°‚>Şt…°VcDgwÁÅl%È`Xc{ûì/uKø üH‘ã$«É4AüÁ«Œl¶¸VÀBğuûÉø„Â—)æ¯µHÁ»W¼‡„‹(,ÜZ?A:µtMÅÇ9ÅTÃªšié0IC-fÇª¡Dáj&kÃcû
+KX;¨bşwë÷Ò´«ÏWŞq8K'-È> ¥5?Dv•/?`ÂÀ¸>åf´’˜KKŒsñm¨ÒòJ*©¨ÄAõ5´ÂU1&’"ßm]n\x°œMd,0¦&‚ˆ mkŞ+\S[±µèjìTğš	.-ƒ‰Ë Ú‘Z|À-37_Ï_.‚Çh±+³0j[ ,n^a‰œÀ \d,D?væœ´ÆyÆgkº}\½u¯¶±2õ÷©HÿÛ½øaqŒË°æàbµF1G¹!/«n1Ş¦`äVX+„`­1ğëèïSëbc²Ş}b‹	’Nk&u\F¿Wï>B¾ut½÷¶ŒK7Æeâ2-¸üœÁh`â2L\ƒÁÄe0L\ƒ‰Ë`0˜¸ƒ‰Ë`0q—Á`0q&.ƒÁ`â2&.ƒÁ`â2-MöŒ'ÿüg:~ü¸Å¹ĞĞPºı;hàÀ´|ùrZºd	=ÿÂn­æ–zêÕ»7İ|óÍ—l£j¬ßzóMŠ‰mrJO§ö:0q­1iòdeã¾ıÖ[Ô©S§£Q£FÉqñtøàCµ¸ù’r•$ÿnß¾[3ã¢âÌ™3ì*7~øáúïW_ÉıÖ­[ÓÔ©Su7½ã'¬§0` İ3mùûû;¼ÏÑ5#òòòè½÷Ş£}{÷êùoÜ¸‘şıÙgzÏŒ{_{í5zéå—e¹J®ŒŒš2e
+mØ°>éóók­}ŠHïª•ÉÊÊ¢O?ıT—C…={ö¤Ç}”fÍš¥Ë7ò¼)<”ıİ‚zhÒ¥kWºë®»¨U+Ë—F:x<ª~Àoo¹…&Nœh³üQ£GËº)wµ°¨H^ƒ\ÃGŒ U¿şJ­ôsO·õêÕ´ğûïå±’×hİìé©´´”>úğC].Ôáşûï§ğğpWÙV:U×¯¿şZÊÔ§o_ZşË/vŸäŒÀB¿xÎÎ>?èıé§Ÿ–å¢ŞH‡¶ùÀƒÊPéJy
+…‚‚k?J¯ôd|-Ââ~¯)«·ˆé¬	‚=õÔSR‰cÇ“„‚¢ ˜G{L^ƒ‚ğĞÖ¯_/¯á>u­CÇò¾†ò´ÆŸ.ÿ¾ÿÁôâìÙtàÀzi h4Ò;wêçĞûõë'<qı7È²P&dŞµk—Kú™÷í·ò/ò€,(	ÅU&Ğ–­u?‚}œCCFš!C‡Êû Vf&-^¼Øn9  ò‡œĞ-òA‚ƒ‚d>¯¿ñ¥<(;?½cùâ<: |´ 7ÒCÖb¶mÛV?şzî\‹r•¬iT£‡şğ<¡wäÙŠ
+işüùõdiO<©§ŞÖäQ2u¤Bşè”?ÊµvİÆ¡3G:´#ãóCÃ}Ğ‹= 3EZë¶l³CzCçbO/nG\ôjèÑÔ¶C¸Èh,èEÀCCï®z!ÕÓÁ¥Æ9T¸GòœêÕ ÿ€Ú_…[¹b…T2¬ƒjTò´nLè&Mš$	‚Ğ«¿IëéAÊ‚‚)×¶mÛdOªÊ@™({óæÍ.ÇrO<ñDmİ„,(OY€ÔÔTiM /6èçuVVòwîÜ™Š9í÷)9÷
+K./,¶ª;:»E?Õ}/–ÌøìPgõ<Ú·ooñ| ;Èg„òTĞù¡c…¾dcÖ<Ôu‰èÑ¹Â:+koı¬®¹öZ)òC] ·ê$2¥=(â8Â~Ña€Äêùá~èåÍjÛtï, 7UGèEy4-fpÊğ€—‹Ê,·£(òèÑ£T\\l‘Ê@¯’¢ÇÄ¦Êl(Ocoø×ı^M@@€]âÂ*ÂB€”° äB£Cçd\RW€†©¼trÆQyEHÔU¹ˆª1@¸¨ª³l¨lC]eY°RÀŸÜî}HkDHHˆÃc[€›ø“è`Ñ°AÎÛn¿]’¦¤¤DvÊÕF'btWÕ³ŠŠŒ¬WÜë¬Ö8rø0ÅÇÇ×««uÇcO‡ÁZo—LŒ‹ÀkÙŠË@È˜˜éM¿ï>›#–*¦v˜§p]äƒ7¸SªØzXˆíT·T=IYKGøÇ?şAqqqÖD=Øç}VÊë…˜–@Åè@ÑÈË°†*>Ù`!\HÄëuÊr¢ÓAˆ¡:+è×•Fé*`åÕ(±Š+áCxVØTbwÖ¬¦ñYåäæê”rƒíu¶Î )9™Ö®YcqzQ±©#X{*AÈqÉŒ*;mFE¬¡(¬aiáÆLÄÅCÅ5’Z¥3ºFQQQó´&#zı…ÊF " vµ‡¾}úHÒâeñP.ÎÁıSƒêØ¢á
+Rnİ²E–ƒt°ªmÚ´‘ÇØ‡ÜÊK1º©*®‚{MĞ§¥¥É¿ãÇ—÷!hÈS±4tÖ¶ƒ ¬œÒ/tNF´4PG<¥¼„…D‡Œ%èiğLºuï^êY¡óB:ÈˆNí£ƒ‹ƒ=èÜ¡Gõü {%—Ò‹ÒqC€Şöj:Ç½Íá
+»¥ÅUnFë¦h#ÀÂ-:tèneayaİÔhnNNÅ}°²*¶—§5àªÁJ©2ºhn£=‹†ÒßàŠâ4`=Ôè7, ­QÉqÂR¢>ÿş÷z}”¼j°d€+ÎG'¡,¾ÑUC<†¸[¹¸hØ(ƒ£Á)åÖ£LbTDP× tÓT 	­õy1Àœ>uJ×È€´ÖÖoĞ¹¨tÑVº† K®ÂxÖr¹òV #ÿ¸d‡<®†HMş%mDVéMÃhå¥ vÀ¶åâ1Z.û_2xÃÿŸ|¢»sp•1È`´\–¿Ögtu”ûv‹p¹Œc}ÙUf0Z«laqÍf3k‡Áhàõ¸—Á`0qİxÏª&oÜuç´ÑÎäô·Şz‹æ~ıµKy?ùä“.ßÃ¸üÀ1®‹ÀdŠgŸy†^ÕV%I½ÙÑİ<àº^EZ3?[Ü¦Enn.+á^÷RF&²ômÚ´IwéÒ…în.¦Î;—V¯ZE©}úĞ
+mşêİS¦ĞÈ‘#ëYÛwŞ~[î?2kÍÔ,*¦ ªóÈ÷¾éÓåL%ÌZÂ‚ğ›nºI.OÃ:`µlÏVşFüøãôõÿk!çŠ+äd‘ÂÂB™Ï_ÿö7Ù‘ØÊwÎœ9rNğÕW_-ÏcÊ êw÷İwËcÈ†ùÁ˜?üÙ¿ÿMûöí“çG¥§AH`ïî/ÂB{qÓgÏM~Ú4D„ĞOÿşıu}cÿ{î‘i¬óÅı˜j©¦BvõT¨+æ}»ªÇËÂâÂ=»T7²ÿõê«ô®¶šd“.©ØĞ@’OD£¹éæ›iÎ'ŸÈ8Ö˜Grr2Í˜9SŞ‹|ÔDw•/64Êµk×Ö¹ºâ/òAc»rüx™??òÏÌÌ¬''ğÃÂ…’PHd!ç‰'hÚ½÷Êk8‡k×]w<†lÈSûöí+WÀ ÊAı¶mİ*!ÈĞ±cGúß¼y²LÜ5± 6¤AŞ(×P7µĞ^É‰ºâük¯¿N¾~~õê½ O¤Á>–0âš±L<tJĞ®¡lÈ‰ûp­H[g¬êa¬ï_şúWY_¬Í½”Û®Q§—•«\VV&êäk®‘–ĞO42Ì	vïŞ­÷úªÇWKË2X­0vìX™/6.ãÈ‹ë(Ø->p…°hxÖŸšQÀª(µPı7¢‘BNDÉÙ][Iƒ/H$&&Êü ÈëƒÆNEİw0-MvJŠlXØc”¥8÷ğ:"""¤\Èíq?ÊäB{QÏŸ_ÚÀârGs ‘e¨{Õbx*i‹$ ,zP:8Ü§“VB¡şª¾Ğê»ÅÅ°«ÜB é`Av°k1íÁß‰µ¡	Wuñ¢EÒÄğÖßıÎfÃÇ4k9A"k9ÑAØZW¤ÅÊªî=zP¬pÛÇ ¾.{`I±Ğ7Üx£®,½³‡†Œõ‚}S-ãS Ø±c‡^7 î³ÅWO«€J´LÑÜuè’G•/A(Ë–›“#İ]#aÑ0ÌVõ7ş­§«4úH°:o;#ÎÊÍ¡ÅÄ_|ù%-X°@~ŠÅXÔ­òSr&$$ĞAáªËn×®­[·ÎB–"mA8Î„Ë……‡E6mš\|¾{Ï¹¦÷±Ç“iÂÂÂ$Q±!İçÂe}ã7dzN¼û®î1ºÕ¯“İ¸"¬%Êû›pq!#tr— ašğ0Î€´)Bf[õÇ1äÇuÈn¯LU¾„€†×OôÊˆ±ĞãÃuF…›éê‚ìÍj[ÌPæÔ)ShåÊ•ò_ 7Æ`YXüóÏ’DF9m¹Õ„Kk¥òE‡ W\Y¬={Ò~aÁ
+„•B=ÓnÖ‹T~ Ñ;ï¼£ŸCL‹¿H¢}¬­W…,/½ô’Ö,[ºTÿ€ ö‡&!3d¼Qtª¾
+8¯ê? ‡ú¢>ª¾HùÕ1[ÜKX„EÓüÃäqJJ
+M¿ÿ~òõõ­oE­u‚F"ıåÉ'éNÍZšmÜ«“H³j÷Ï˜A_~ñ}*Üd _‹Ä(­-·îïK³gË/6@ÎY<baıÕ_X,ë|!Óˆ#dÔñà©ìl¹·_ ¸òÊ+õ< MÕ>­ƒò0Â‹ô>úh½kXEe¬›#‹‹N@érÜ }˜2B^lÈò ÆFHÙáÊC¿ªL¥×dÓZ×ùªú¾+:•lQ×§Ÿyæ’'®Åê ŠŠ
+^Äh4`Uÿßÿ(IÖØøóğ¡CôüóÏÓ³Ï=gw0ïr¯b44 ¼ßMdÅ‡øâ,Z¼Xz	ğ¸}Úq•Œ‹¼6:uê=¨Mn«—áÀU.++cW™ÁpSäòşæƒqI¹ÊC0L\ƒÑL`W™Á`‹Ë`0.<qYFË#.±Åe0ØUf0ì*3v•v•—Á`¸ã¶âşºó0ÍßFù¥ò¸r,ıöŠìO‡³réùoÖĞ+SÆQ^a‰¾köpÏßÑ]#»ÓˆÉËÍ+,¥×æ¯£yE415‰®Ş£E7€÷n ˜Ğ€ëá.õ>™[ Ÿ£Ÿ·Ó²_·e=oÕ.Zs “¸º?%·Š”ê£Å›eÃúÓÍÃ° ¤øHúğ¡kœªŸú°ƒ#ì<|R6Ş·¦O§¥;)Ó'tJ7îPotÈ/|»†^¾{ùz{;-;»Ên€Ã'séÇíGè‰†RFÔ~ğ,Èîß—³”6î;F	Ñ¡u>„«?ÿá»ÃEÃñº¼B7¨wnAñù=W&îÅGÚ‰
+ñ÷¡¤¸yCıèƒ&éäVõ9”•C/Î[G/İ5FÜŸVí:BŸıºG^O‰§[¯èAñ‘!Zs *-¯ wn”ÇS¯ì#ïQ0Ş{ï[ßË<Ó…øjõ^*Ğ\ö;Ft£á=’äş}o/”eì?™G}“bhúÕô¼Î•ÒcŸ.“ç·9-ÏMèDƒRZÓ?¬—ùïÙœvÂérî›JŸ.İ¦ç‹kÖuQxÿÇÂİ¤Q½’uy²ÏSf^±~ß®#Ùõê]Z^IÿY¹K–	ŒHI ‡w—Öy—UÊkxVC;'H©UX ~î×¢õûÓO¢ÆñÌ	})YxGp…ùâÚ-ÃºR„pß_²]Cı§ëÓ’m‡¤ì×íVï>£<O¹œ‚ı|äyU¾*¯¥ÂÃ¦¯èÆÛ™übêÖ@:c}êöáj¡Ş1¼+½1íJ*,«Ûè[ºd›<?u\*…‰ÎÀ˜ïğîíä½	Âò|0s"-(¡Dcº¶_y|ßØ^2ÿÍ[øo¸6}Bÿúr
+ C–YûÉFy»m¤<ñöfdK¹])ç›U»%ù^ºs´<èëMÿ¼Õ¾®¬äyü†¡òŞ,AŞÂƒ±®·Ÿ·'ısşz™/Ÿşíp:têı´ñ€'îE[À9t8#ºµ‘éA`Üß:*D?¿n¿L÷İúız] \ûjÕ^J5ê _+ÙËDgëPª•çÖİë•×¢6{Ä5·€ÎHªØj½03GîëÑ|}¼èo·^A\7XÏwÁ¦tÚ’qšn’B¡ÂınHä‡ÆŒüpÜ·S‚ìéWî9ª§ì×!Şa]p²ÄG[wi#KD£t¥œÒŠJúu&êŞV¯Ãä¤¥ÉÊÍ·©+³a`R•{;Æ…RÆésõê}Hx4¢s»YX}Ç	ÙQŞO;2dùHÕ»]´A‡Âr
+‹¹qÔ.¦6”QÇ(%öï»ºŸşL ®h×ŒÏÒ(uÃò”çUyĞ‡¹…ıkÑ®rTˆ?mä²%ëê]”bQã‡ËŠ	Dok¿fy}õcÔ¥MŒƒ¬ÚüĞ¨ãB,òğõ¢¢ÒJıœ¿—ÃO˜ªëöÒc×•ràêŸ+…Í¸·¶ënv(¯Ù`±Ÿ›_¢‡'ÆûH5”|uù˜…«êmÿØwYE-Úœ&Oï:šC™çŠÏ²şsÅÊc¶’ÇÖGí9Æm^tˆ yÓ¥ûˆÁ)<ğï6§Ó˜m©c«›Äõñ‚½zNî×ü…»õá²]4Æ*ëWfÈ£Mt(m<xÒ"?¸šA†Fi&ÇßV×í¥Ç±+å`ğxhBêÚ6Æn¹uù+O¬~ù–¿ÊPWoõZ¯ÚTÜ\¢V^Yçi¶ª³¹¾ÔñËß®•õ‚U¾íŠnt0ë,ıOxBÖ2è¿¦ şkH²QÇ–NÜ÷k}íâÂixçxzoñ6Ú’vBÃ{ïÇÚ~êß©U½ŸQû4B¯–Ç_.ßAÏY&-‘z¸}:´V7€–ŠxÓ¶u
+ù¡#PùAU²¨oû8‹Şİá¯¯9qìJ9¾"şìÓ6šæ‰zÁ¹ùk÷êõ¬'ƒÙj”Öúš™êÕ;I<ƒA®¹Â¢ãC+v“Ïåó¬Í×ìğXåyQOÔëÚÁ)2Õ²]Gë:”ºç İ× <6Ë£ık}-ò=î-Wô¤È­éôá/»‰~©ıµ=4ÖÇ¯,Ü%:[XVï½,ş¶‹§ßM¡/×ì—[+AĞû®LÕ{e•îªÔdúhùnÚ{ô´M—ÙlÈïQİiîº2? ùíÖÖ¢\[zµ¾n/ıù”sÛ¨ôÅòôç/~•ÇÆzÚ“Å‘¼ú5mù<<©?ıwõ^šù~í¯÷ëO¿ÜÕf>Æ10[Ç*o<;ãóéF£»·¡ù›	2R\x°¬Ë3s×ÒƒW¥êy5$ÙA½dçÑ+ßm”úíÓ1¡ÅX\‹Ï³f<ÉŸge0Ü­âãíü’/ìc0xpŠÁ`\ âòz\£EZ\VƒÑòˆË1.ƒÁ1.ƒÁà—Á`Øv•†ÃlMÜÚÉ%lqŒA^Òg¤R «…ÁpCTUUáOâ«—¶SkgÏ-ŒŒôe51î…sçÎ•‹?•WÍÚN”¥LßÃ*b0Ü7uòb‘·ØğI‚V=¾ûşû9áá^¬*Ã=w6¯êšÉ“ïÎÊÊÚ%³Ä–ÅŠ&-Öõ,,,4ÈÌ<9pÀ€!ü£×ÆEFnNNÕSOııÅ­[·n‡øú_¡Ø*Lqñ	<,ï‹[›¨¨¨”§şşÔÌ”””¤öíÛû°úŒ‹ŒŒŒŠ={öyúïO¿“““ƒEØÇÄvFlEŠ¸ ,¯¯FŞ(¸ÍbÃªâ8á>w‰M4›Í&l¬R£y`2™ÌØN:uB¸ÅûÄ©l±ejîqFZÄ¹Õ*–Å0s…v£Ì{Æ¸òD&g:wî<ÔÏÏ/àRPNUUUuYYY¥µÂJJJ*Äµì«óx±-Â‡RÙ™ËËË«JKµ;˜Ã‚róóóËJ×Øgÿ"##Ï÷~/&ù¨¼œlp\¯}¨>00Ğ×ÓÓÓfÇïëëëåííÍc*DÛ,Ù¹sç¨jÃÇ¢‹5ÖÕÃQ±.«4ë‹A«PÑbÇŒ3H<€Àf&U jÜTYYY%ËUC¯¨¨¨****³&]^^^©H[m „¹ººÚ,z­"c;2^·³O6Î›íäANœ'e6qµ¿&«sÎŞo:´&m‰ìœ³'_½{„±ğŠö·——¸hB°Ñ!ˆÄÏªC0‰ÎÃç­Ó‹Ê×ËËËób“¶X`Ù²eësssOa JÛŠ4#ZIuïqm>$×K‹{A`5XôŒ!£Fêœ¦«)WĞ¡(´XY-œÇ:y™ª³³³‹D¬¾|¡IÌ6Hcë\MD³EWÎ‘BÛ#%9IŞEÜó!­«÷š›t&ÔÀ5g;S‚ÉA'brtğ<<’’’‚¬Hn
+óöËÛ:¿¨¨¨ kOCt<>HkİQ„„„ÈGŸ8~üxöòåË®@€*Ö[¡yÀ5o^Y_Ä¾~bó×6_í¼§‹c`f'6rá:"£+¤mè˜œ,«¹ˆëh¿1dt–ô]39™Æä ½É…£!²6tÎäDÇàáDyÖù«ÉO•ZìZªmeT÷Î¶Æ–GgjÀò4X_µ)ÒzX	`m"&'9%YC.®ÙI’5D4WÒ6'iÏ‡¤!«3À™vFçAJW:*Óyºï&':gÓz8¨oµ¼†­J;o339Ãxì¥í{Ú¸·±.ª³–°©Hgnb	İ‘¸Í•©‘ù7U‡`r¡“rä~ŸO§Ğ¼fy«„­q4vbR+‚.·­J({öÉ†Åu†hMéŠºƒ…c\Ü¨±éš‹üÎ¦5HZc#´¬ß g".99hp!­ƒá†é<®Û³¸Î†êÄı? S–vBlŸIœ    IEND®B`‚                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       GIF89aP P ÷ÿ ÅÅÅT»3|î[Æµµµ:qÈ¹¹¹(U›Ht¸àààx£çf‹Æ‹«İ3mÆäää5c«Tzµ&W¥ÓÜêI˜W“ñ±±±­­­‚›Ã¢µÒL³©©©£½äQ¹ñññAšªÂæííí[¾¥¥¥eÕ³ÂÚ¡¡¡ŞŞŞƒ«éª»Õãããêêê;‚ïÜãî6i·Úäó|¡ÛDk§”²á¥ÛY’ëÚÚÚÜÜÜ¬ØJ}ËKŒğSƒÎâââØØØ=‘“©ÌÖÖÖèèèïò÷uÛøøø+cºL£ÔÔÔI«æææ:wÕĞĞĞ\ŠÑ$]µUæc‚´Tv­k”Ô‹¤ËÎÎÎv’¾$aÁÒÒÒÊÊÊÈÈÈC|Ô™™™ÄÔí	E¢ÌÌÌDyÌ¤¹ÜHØÂÂÂ¼¼¼ÀÍá"jÙĞÙç¿¿¿k‹»Q¨ÀÀÀb…ºsšÖ¹ãM‹ìª½Ûr’Ã²ÅâÀÌß‹¢Æc›ñbÒ™­Ì˜µâkšâd’ÛºÍêœ±ÒÆÑã¹Êã
+N¸.iÄ\ºC…ëƒ£Ô)eÂlÉ´ÉéËÚğàèõ›´ÜR²{Ò"mâ.xír»ÊÔæ~™ÄJzÄfÓ{šË”°ÜqäjêÊÈÖíb•ãC¢B€â©Ô»ÈİX…Ìb˜íLr­¸ÆÜJ´{–À(uë† Êw§ñh•Û¶Éå,tä¦¸ÔyÙs”ÈY‹ÙAtÃA†ğ3^¡†¨İBm°@uÉÒŞñF‰ğ&rê*iËÊØîT…Ò‰¥Ò°Æè\…ÄJ†ãœ°Î cËŒ°çm¡òU±n™Û¦É——— ²ÏS‰Şßæï%pål‰·^ŠÍFª/qØH¤W½¾Ğì¯¾×N€ÍU€ÂP|À^À ¶Ù¤ÇX‡Ğ­ÀÜ™ÀNŠç	G¨Y²p–ÑL·^–í®ßE‘V¸±ÀØeˆ¿?p¼g†¶PğÍ×çPo—Öo íFˆí€«îh™æg‡¹iŞN±^Î†ŸÆoÀFyÈ]ß“³çJ¯×ßìw—ÉO…Úˆ§×ŸÒUÀ—°×‡Ãÿÿÿ!ÿNETSCAPE2.0   !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3jÜÈ±£@VT€ÒÁ£I†*¢‚†’'c£A	 <€‘És R$0B€€Â¡4Tô<80`”"¤)%…ƒ  ¢¨4–üÑA%¤ì`ÁŠ‰J*À4(BD@@´+®;¬X(“0 ¡Vv La£—*Ğ ÌWJĞcT¡
+µ¯ˆ@C#AŠR*ğı§D )pÙi1gĞØ?Ğ®î…€¡?ÂZìæG5 XèÌ÷Çè&xdÔ¼£†"@‹âÀ„v‹@ª€ÿÑù}µù‹APë#XóƒÈ‘-0À/¨âŠ²‘Á1 ÓE¼ã~ûıF%X€ÆJ@äC!Zl€ŠT0 ç¼6,÷_N9D†.4³†å˜BK´p
+|”@ R˜à Ôàb4óA/¾ä°Â:,±	ğÕ†<Å’
+@8ĞĞ)ıÄÀ€È"'À¼ğƒæı ;dæ@w?hÉĞ)@11+¬@A:®Ô±Æ0ğ¥ğV
+H$`ÂV„QAA´R@Œ€	=/ÄğÁ4dìW… 5ğh<4Å2ÀLÕ R. 4FXÿ¤[pÀA Ï £<"î‚r"Øğ’DL°Å-@E°jD†pDkíµØf«mEÅs3Ğn+Ğ)\QÃ\A[dƒŸ?â¤„ôÚEC¤KÎ+TèÊ4\ïL€Áaä[€ óL ÌPÑÅiˆ±m
+eøgÅÆR(¡„pÅKÀè2&s âÛrÁ¥	%T
+R„!œ@Á
+9HÂÀ»lkÄÇ¹‰%BäL,¸è¼B9’xóABÇöæqŸ!m.
+‘ƒ"êÜ!CAkû15ÄÖf›„B?/,ÑÀ }<óˆ k›VtÿìqFÎè1Ñ4ÀÌô1N<ñZQ”C†Â±ÈGØsÄPÆû%”P—	+Ôíb„+î&P‰®ç°Ç.ûì¥Â¢´4Q”…WHTÌ=xÁ"÷D;JX†hĞDd|“Òà F#Œ4ÀÑ1½ÓÖïèÚG52lĞùyf9@´¡F\Qv”+DÆ+ó0†"3xÁŞ·4Õ ; ˆf‚X‘¦!pØÇĞ‘ä€2` šV£¦Òd©M@ĞŒ¤Ã8”uğ+ğ…j ƒğxpšb		¨‚CPÀ´èbÒèÿŠT ÿÍgTĞ¿ìƒ˜Á{La?CˆN¤Pš¯t@‡ñA P€d#ÑúA4 ª+TàîRŒSã™²Öl º
+ a6sÌİ?†!‚ÜœĞŠ4CYT×“êıâíkCµ0‚6D" Ôj`` tğ†<ˆhdb2x3ŠÀJ±ô€ü˜Ef0‡g à"í@Æf ~|‚e|9G¾°BEô!ğJò˜NPAŠXÁ
+…Õt®FÀ‡d° ˜‚5Şpî!ä	Ÿà‡.Fáhb5xC34}>< !d8À\át  –!C¤ñˆB”«9Å=´À G´€’ÿpÂ;
+Ğ„t”¦8Ä1F`”'d î™|b ŠÀ¸ñŠD&d|(À8f¸Á¦t| :Ö°¨aA#´P‹[$©PªT§JÕŒ !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3jD¨¢ÃÆXé ‚(ÉÀCFá
+?€ 1B`Jpü‘xsg	X0"ÓH%71:óT(Ö KˆxXt°‚%	T©À%©Åb>´j¶AFµ@<ˆ1æª[‘r,†F¯ãÜÚÀ·—¤/Ò¼keP…)Y¥TğxP…0?:ÒÀ[ÂT2Öù¢°b ³´\¡QÀÉ  $PáÀÈiÊÿ¾xVBV+’ô‘¶ÂŒfœÀ4R`<pHZE+rPh¢c“b+\IÂ„?”ÿÿsr$ 3e²ä¤C¥æ‹?ŒdıA@„Måpzp`V šW1xH0ñ``hà€x-²8°Ì!Ã|`Fu`‚÷1øÏŒ3‡>x
+†V¤’o“Ç1iÓRŠ‘`F'xğÍ54¢D	1@Q@ |láDqE	6 `BDp0Ë¨àl’ÿ¡A	„¡O>tJ!µl  îPHpi… ğÃj ¨ğĞ0ÍàR/²€‰Õ¼Âe`(QÃj*€° CqxãŠ$œÉÂ‰2¤qè)·@<
+2Õà € HâÍpYEV$ÿ@ƒ`ğ`fT„ÀLª¼°Æ ["‰„	*F×G`Ù‡¨"
+ŠH*ah BxñÄ%G„°
+2¢`Ç¥@ (!…ÊBDÆ¢CÂ¹ôÖkï½øæ«ï¾ãÄ=´rµû¦F)$¿dÀgtB0¾`” ‚¶%Ô„Ğ"Pà@ÒÀ²ÉûQhœ WäÌk‰1IÌñ‚<×€?Ğ@ÚÏzä‰xôB 9HÃkáÛ)¬ÅÉÔÁd¡PHÑİ -ILç›Â;¤«*ttWAd¼±*ºÌ‚‰„è; >'`Â	ì0ìAş¨ÿ¡ZTÌƒLûZ€ˆ[±nË<¬üa€T 9¯4¯¤ÑtåWX…e´Ëïê¬·îúë°»n‚V\´DÅsAÔÛe\^Âp:4ÌÙ²Š8qœ;„4Á¶”PDÅLà0¶¸â…\ÖĞ©	4ğ |"ØêĞ.ã4À‹1MÈğÁ)ræí ;˜ğƒh ğ€PC9 ;ÈÀ\*ƒ+±Õà]qˆ3È²Y„¶ğ—*`ùä*` ·b{hÁÄğL¢À%ÔIQ; !¦¼Á8À'3ı La¸Âÿ6 <ê!$ D"@‰z(6Ğ@À »!v
+¹‚J €ál¯SÁÂP†¨îb»ëæÆƒì %°‚€gÜ#C(ƒ§jP TÀ`ğB´/ĞÏ"R¨"wd%…0hÀ)O¾Á‡ #†8$Eêt'™ õ	ƒx†‘¸#–pOE:€:¬oJ(ƒ, ¡¬€)±Œ…Á‰)°F¶t‡(xÈ
+œ ¼àC4"cL£ĞÄA„¡1™  LÁ Hñ`€xpE’1£µˆ^ÑÎh«N4@BÙ} uyÈ$€>êYk¼£ Mè¤¡©‚8àtP‚	ôYÄ*œ‘^ø?B!€ğaƒ,  ¤`†	¨¿‚‘Ì€X`†8R 1Ş9¢¾ŠÑŠGÄ ,ã]cŞ¢F~I •pÁ-À‡E† MªT§JUŒ !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœxŠ8»P£È±cÂ S|Ô*T¨R#:S¦|"/Æ -•pyçO¥M‰Ã"lBcÃ†¨tD€s³hÃV‡
+,²n¤%Ş¥1j	jä:ØƒCXåºQ(W ‡TSÒaTƒMZ)Ø•/¬X	ÁŒƒ‡´õxŠUëƒ+Ò<¡ëµ¬råd50‹Ö`
+aŒ$á¢:6Ô“ÔÅì%2Ÿ¼kğìÎ$_wõyGÎr<Tt¨ÒÙ ™Nè^œğEAQßÂ97ïÑW®^ÌérncA®ìP‘Â
+ˆŞÅDÿ€õŒM”'ª (jznğ†
+ŠƒYÂğHà€F àD†H3Æ
+²P Š«Da'äRJ)™´ã	BX‘@
+&  A
+t P	'’¼ D.$ $F0>ˆ¡?$€hâ@ÁlÁA:áÍuL‘&üP†*ì8[4°„uu €ND‚¯ˆÓÈ)suiæ™éqÁOƒfZ§ø Hl!×›QƒßI„‚ƒÈ€C_öÀ€§@*ØPB ğ€ ®`3BT0!CØ`AJ$ B‘AkŒ"‹"˜<³‰xî!)¨ÿ ‚	¡ŞâŠ¬ÀŠ%¨È€{Öà &€Q'Ït¡Œ"å¼ š&xª@Ã†&(†MqH ĞR•ªÖP‚ÑJ6|HóŒ™°p¨@4PBèNtÁ¼"
+–ó,ğÀlğÁ'Ü+<Ğ)p¶­\’Í †ğcCH|P1í8"Ì4 A™0` "„‚/|1BK¼àÌÁ4H¡DUüğ´D!kÈ!€,B¬±ËÁšñÇ³"DB,M?-ÄyP½ƒÕ¨ğ©ÖÈ;IÌ!ÃÏ'ÉC&$P÷Ê3ğÿB°L°Ëh€Q8  tğ‘—$sI'‚‚%h ‚}*‘#ìÀç‡.úè¤—núé¡w`…YhpEpÀĞÃ+nÎÛ\€‘cå57GŸ0óŒ>ÁÌ«!?HQ"Ñ1T„0‚*Şl 1š6î°Ã°<pFA€J^3Ğâ›?!ì°)$ğ >tÊ ½”J:Èø¦µJÔ @p€	šôO¸`ª ´Ñ9'M.VàÁ€ #ø	ÈÀ®÷¦
+ˆ€ h—:@ƒ‰H`Öh ™† ÊÀ
+F(!êòdˆK3ÌaA†À+  aHÚ™ÿ!€qDuíë¡½Â`&2àˆğÂV<†iíÀF @l „.#@GÖpŸ„¤@	JˆŸAL†*˜ÀH¸Q,ç$8lc`; à„$€S;H® ª‚àÈ
+4@‚vPƒ+l‘€
+€Eô¡¡A"H­*„A
+±‚À Áhï`Ğ@¾$\¸âİà`ØÀ \˜‡ŒÊUşÃ
+%È	R@Áj ’¢F%ğ X$Ã	C	  ;ø ,@ ‚¨ (ÃÊ¦‚ş  KAğ„5Üó¤"0€¶§H€u1×&	g‚O!Á`ÂĞ §L96{nq‡–ËL
+: Ì…óüœ ïiƒƒğ Ÿ|#ÂÌ%ÏX© 4Ø¦r˜´ñå¤•Ã+ÀÛÙÒ ™¨Ã( #ÔÒ®Ğ»’P
+R 2kJÔ‚ !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹APPCáÌ C†âäÖ X±ğÜXR¤K‰Ç¨‰ñáCTœ¼Üé°X@:€X'dSŸ-Å9…ÁáÀyzpØ– }tQ À¦A€#.:à'S)1N¡.ä¨'„'T	^ËÆY¨+à`ïBAú,ap²Ğ)sjú0çà&$%çj LåÊıéó5œ\U“±–f,,F	× 5¨ºÈğ¤`	TºÌ‘$é@gZ
+üö.€´/“zÕÙP3Õ1,xájSüøx0è£²Ş¼Éÿ˜3.A2=êòPÎ×¨è™>0^ùd­@‹J‘ƒ×ˆIMu,OApAEI¬ÀJåØ2OµÑ÷Ï5G0"¬PPÍ3 yäáƒÁñ ›ĞCAy0XøğÁ–( *nTÔÉ#B¼ €l(ÃL öø`ã?Nd#Í3B,GÉ=ÅqKu0 Ä0ÃAÂY¸HĞ òˆU„oà²†+sÀÂÌa=)P1Ö`€âH L³>äE0ŒĞ‘1Ì4» P&¢ºt
+ô C\‘ÔV$@Ñ)b¸òL |L€i¦?#\1DDdÜÿCHªÀ 8~d:Ğ%X€Æ	t DDáT‚Ë	9„’Ä3-è*apQÃ*¨PCDd"C7°bÉâ8û	F˜à@ĞpEDš Ğ-Æ4ñÂN:km	Ô E Hô@|Hc‹^è!î?<ğ ˆ ‚DA´’Ì!«,°ÇÁÕ †h<L‘ 0Æ$—lòÉ(§¬òÊ,·,n1‹ÀàÄ©(w †`t°0ÂMx²rhPt (t*8ĞG5Aª€RH¡DV(dÎ“("Ë¼4c¬B&¤ HxŒƒ¤#@2|öÁc£› @¨}P0ŞØÿ2B@²²JñCÂR(tÒğÁÁ8ŒmAT`€Î
+#Ï+”Œ¬r   æ.—núé¨§®úê¬ŸŞº)TDÆ¯8q
+É;”a€6hğ*¬ØÃÌ3€äé,4Ğ Dèh ‘L03‚*Ş´1÷“Uì€oJ€A€§¥1Šä D;‹;œ›‚ò?D”Ç È*‚C5êZ4à«H¸Dôà‚¨b `Â£ †
+€A	èRôÖ ` 8xÇ!Œ§+ØÀ°ÒEMøÀ³W>´.SC€Ÿ(Øº|°R  ğ»‹¤à& İ“ÿR%XXHz8 @Ğ`Ğ ô4¬
+ @ÜÙ~?Š€À
+;Ø¤`€„áIJ°AÂ A¼‰‘Œƒ¦õ> ¬†j±@	p…ş9 	øÁ»‚¤ pFàB!¢ Œğ\Fƒ²f¡
+àì)HA „2hÀ±B~ ELí 60@ğ…/. q
+Cæˆ·s™ò±‚™ 1º²
+Æ.i š’62Âx	m_°Aª¸?8À& c	˜ø¬J	ÍTA
+¤ DÕ¡ÔªÖvXP2cjìÔ5I€€RS½ Ğ} óI@øAúi%H²¹Â;ÅJ%@ë*ˆ
+@ %¤Ë…ˆRğ¶ÃFÄ†!D—vPoš !*¸¦½ªÀpS ÈB¤€j9 
+°A9SGQšæ-‘ì×‡ÀÆ€ Hø^ªº!T!‡ué§JÕÕ !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹É Ğä£GA®µqQH¨{SN|"¨fPu*¦²fÃaEp ëÕëE5"il
+Mø$,º±éÃ!BS.ì:gèB2$ô` yFîÅƒA`‰&cFt¬"<u¯V¤hç0tb/D’90âğÀà“-à½Ø %V)r†³V—Œ.Šp%§H%B$=êÂäBA2=80ƒEª×†kÜD&ØH†·œ”ñ±çãà"h/bÔq5B‚×²©6VÎ×¨è ‘™-ğÜ<[9V„¢ÂLÂ]nŞ”ÿÂ'êxÁ¿ú4X±BVg°˜ˆ¡şï€êY+ÊU›L¡1æÇ8:,AAvÆH@6UQwA2`‰®"AE$øÊ
+L‚-dFß?A´r¨¬±A]`È1¼°Dš6b¢@Æ4z`TŒ?¥|ÀÀ¼ÔˆCÁt^HF9NğÍql&eJ‹ô°Ì;}l²OI$?Ã¸å?×xÀA ÌÌƒNx0D§P2N2Ü¹e1ß€Ã3T<#ÄZD¸°F5ps†šHîò
+,4`J£Ô1H,$Lç	•ÔSN"¬R¦”ä,ğÈØ´ÿ'Ç:àRŠŸ5Â ;+°BÊÖ¬é„>® "G9¬”3ÉèƒëBSÀH"M0àJ[îÒÆŞ(ĞÍ
+|aËÒ=D†Ü„ ƒ7Ó¬ùÓàR‡ô`Â‹4òJDd@°§¸+(oÔ!c!ÀÁá|Q‹ÜÅ3ƒ½³ÅcD0<P„<›±EÅ48òÉ(§¬òÊ,§\L0\£åÊ*„Q),$A+ï|’A+²œ€m
+¢,üôa‹-_!…JTñƒ	‘!Áì(¢Î†P:r4$BH Ñ
+‘Q.éP+Ì<vÙ „
+$ÿ…7¶¸“ø´ÀÔUñ
+é |0Ó‚&-ƒP— ÂBb¤18¢¶Ü\(1DË¨§®úê¬·^P
+}»¾“…Hqºì‘E	T V”±;ïÕp»ğ‡Aƒ	 8ÌYÀ6DD †Ï'`6×oÉÃÕaX`Cø¥ ½<˜ w
+;$ğÃšÔà=V ÆC)XñCpÀ „˜€eX“	~`‚¼í ü3A
+  Ğ&0‚ö·¥”A	&Ø
+TPƒ‡¨€  ÁóV% À óÛÒDP ğ`H D¸ĞP~W(CÿD»Ï Ü‹ÈÙT (°@	°&°!ğÀ›“Œ Áò‰ÀÑC^AF†X HcD~Pá]¡ÇSã?Â`ƒA‚<ÄŒP†íÅq6WÈ‚Ğ „²í R¸÷xhàr±`…æí`Ğ!E@ €²%Àag“‚,X <H€`%„A	B
+r–)„ÁL€* ú¤ ¯ÜAüv@ƒ+T ‘Â°ƒ+ÄĞ V°€¼—€ @ôQA¬@ X0®e2	€†x cA”P¦@)ĞàˆÊğƒì	4 CÎW’+ˆ •;H  4¤6°ÀL°7˜`D&¨A
+ NàÎ Ğ   ˆA‚&Ğ ?hç€ M¨
+jÂ@1IaœÒ}	€€ü@€è‘hÀ)p!À€*ó @sÔ¨	F¨K<SŒæR™È…£"õ  sÈHªÑ}à»ªXÇÚº€  !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3j4$œ3ÎŠm)1È"C„bár#¤Ë†OV¡ª³ÁUµ/s"ÒCNrˆ:"F!2:3ÂñÀ"Æød(ÊqŒF^v¡HšĞ“33S¨rì ¬I¤ÙK°Õ2X¨pÅ*´•kÁS.´¸*àB}ª	QğNƒ×.qh %®AıôØ(Òšzìq;ÌÑ	¢55ı´4Ø*^9|¡&ŞdtÆU+·"³-	ƒ Ø•ÇZ„=Bô1%@›g ¼şç,³D¬šèˆv±jMd	°ÍAùë ø4ÿ Å€†‹¶ÉxÁNöÎ/'snÕ/>0‹²aŒ%}ğÁÙrAÀR±ÇÌÑB'¿-—”&§Ğ1š„DføR0ßxpÎ+fH6‘zøåaANx`Zxcáƒ<-dA‡†ãÁ;0‹kÔÂˆŠyKÏpÀG+
+äD}2‚:’¬¡…$@õäàNã0%ÈTóÅ
+¬ÈÑËx‘<°Ã&)¨Ü¥®°G[ìÈÀ€8=-ÆĞãÍ"­xÍu¼ĞÍ
+Š`ñÌ&fxy	7Ò,É)QşƒA)5İ‘Ä Ì„ ¨^>°L4¬FÿD<ş-Ñ@ d0`¨3ÅH“ÁDÈ+F$#J<<ëì³ĞF+íH)P‚0%„ÑÁ´ÁñDà¶2LBVØP‚ˆP‚4LÊgp ï;k„F¾ô[AÑz#HÃ3<³Àu €U(!±RpaEÑ’ƒ:ÀÂK¶¨áM&<Ò€D
+	ì€ò	ĞÀƒ<+FuÈ@
+ÅÙÁ .ZÔ%€ „
+Hìà 	¤¬Ä³Áìñ7
+PÀJ9£¬ÑŒÔ$EĞ*m4)¤àÀÒÎSÊÓ’HMµÕ.ìB ¨p´	ˆm‚	4Äì,>ÔÿLJÅ±ãÍZ8C
+?Ô@Ãâ‹ÿ ño¬C#4 :àÓè@ Xq `„z CëÉ84`03}àa€´W@»dG‹Â9‡ÈËÁ;g¸†daCè=m1NDàAi°ÅíôÔWo}¨*\a…&\ßĞdQ‚ Æ¶Ş'¤P†Jğ`Å¼ò`€Ô%XÆF AêÆƒPñ€R(ClĞ½‡èë
+U0Aà –Y!J`Ë¸@Ä J Ñ&ˆ4€!J 0‚	è–B„FSØR†@®à‚»öˆ˜€kr3ÿ®†2„J@Ã ‚Ò9$@è Òä§@8ÑC*p%Ğ"Fp€	ª  X F<– Š  a° şr—>…ÈMuÌ”°Ä<*dA”` iD&HÁ%¤@
+4H™Ğg%Ôàe—óT  4›	(v‘,q”ÖZ¤] ‚0a‚H Á*pXa‚& ƒ8™
+Tà–,K€ÂP„F *’…0Dr<pår    ¨ hw@	I3–93Za*HÚø$Hé¬‚DpAƒˆÀ ¯¦¾’o€Ql—„x )Ò  °ÀAúi€P0š6HˆÀàÌ+.‡K”çÈù”àŸI‹f	RP½t*„¡ys Â`æQ4 h€ŒùÑ *(C@ lô¦é@î– —õ¨HMªR	 !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3jÜÈ±£À{şÌIˆÂÂ£I†Å`Èø€‹A´b'c\t‡¤t¶BL‘És nÁí•BO»œ‘éy0ˆò-Ex!Cu9
+ğKƒ0H«ˆğÜ;Å´à0Íd4(2Õ`±Õ^È˜C¤mÁVÙ ÛPIŠ²5İÚPÏ’4n2r³á$Máxà&Ûº¸³jI9îB XHÆ®Ákï¤ «É³€ÿ³Çl«&:\<5N1YŠFØ»X€yÓ·çb1?2dØùÂŒÑØÃÎ8rå…,FMÓ>¸ÿªFåŒi¦Aàˆ9_‘‘Ä±Mßâ#e*XP2¤¾G eX‘Ÿ6Øğƒ‘q?ÃÀ‘
+?8@ƒWPYˆà?Nô¹€âDJt ‚&ğ`hPBş-r	Èíå—C* a¢
+* hÄaT@ƒÅœ#M`"Ä±8ãHğÈ£	ìÀƒ`áŸ3ĞèĞ…"+øRÏ ZÀÑ?˜ Hì	ğ şÈ¤ä°B’¸rƒÑ †?$P¥@¤ ÒGkÈĞÍ
+³t¡C4ó4„€aE¡)ìà&* èÃŞÌ‘?0“˜C ”ÿ`A§„Ò`ÂWlÈˆ(2TÓ|°Q6hPA Ha0"xÏœáBdE"T@ Ín¨Qx+î¸ä–knEüpEİ+Pz×4¨ĞdaC	Záî@>LàÁ[ôpL†…ÚV °¾î^ÌpÀ4ã8ApAU(!…VtlÅe„k.í<òLÌP€üUŠV©&h*q.†¸òˆ.¦¬@Š7Da L™€T&Ğ(¹»àR‡ì9ÊZ´aPğˆÄÑm¦°ô¸M×ñBÔ9L]‰Õ)‘h
+Tî`4Hq®Ó¸6Š°b‡7¸ŒÿX£F‘±ÆR  r¹pÈ…ÀÈ3è0à2AC F@€æŸë}DÌ«Ès±¦`Ü+B	"h¹ï?ñœ“MGláÇéu`‚´ëná\€Aµ¯oüñÈc™&_PÔ<ñÀ9|sD Œ" ‚·A“É6:ôÀ;[Àğà½ W ±!(o¬ñÂ°„ [,òP"  ”ğ$ 
+"©;|Ò B"€»„¨ ƒ2 Bu´:µa‘P€X!€/è`	¹ğÎBR -l«ÁèTèÃ/˜D9d‘9¼€À@CÿB ¨`	0 `ÿĞaXBVÀ
+9¬c¸(Bƒ¬ÁJVƒ:à¼(@(d!¦Ab=\&Tˆ  
+Â9ÀÁfHÀ¨C3
+á·')Á
+pQ¼5¼£Ux„7æånBV(•¸00lğÏ@„Ìá¼…Á0è„œQÁRúG°@ ´˜ wõQA± àÂ¤ #<H4ğµX@a0‚¡j  2Z„Ê< làÌ²d¡V0Û~P†!Y¤W¸e® ›F` `l*„G!À¶ªDƒ2˜³,0Âzô…ˆàpI Ù™€„„A H@ôòˆ° B: ‚l&@	¨fATP‚|!]õáAÑx$ß	d˜0s€*€G„¨ `àLÚ[ò`
+Ñõ¹2!ÃT¢zÚÒŸ¤€h• °‚•ğ½§ZõªXÍªV3 !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3jDH†ÌÆÅ\pÁBÔ=(U¤X©ÎpÉxU¥ÆVL$PbÀ‚	„NÀá˜”361ÒH0¤W*Ø s7xÀãF)©ÅJT€ Ä„’0l¤0è„C6l
+pèÊñ˜¼”¢Ä*^! BƒA	æÈ1§EÍƒdzA…Ç
+½Ë ø‘ °ƒUÊXÈrP“/kÜœDøäSz½Öd’€y Vj8p°#	+J¬=$ÈÂ!F(§j^”Ú5h£$A‚¼«€ÑĞ¡â+ªd…ÿâÇôaJ Ã# 	x\1`q˜>’ºp8czŠ,À;¤ J(q0ğŒ6bœ'6X †KÆİCB8ıIø·]a„	4HÁ¡ˆ©4\Aü€F?¨ÀbE& A˜6\q#JFÄ'E¤ÆqÍ9LNDîà@F Ğ“? ùO­\ÂGjLs
+D4t ‚
+@8" e<E@2àqGığ`&`DTZ>,Æ¬0Êµğ<˜°[H˜ğCZ:ñ)²@ÁŞ0òĞ`HÁƒu aZ2È@7$Ë3c:ÿÄƒ 1 N	8ğ’z´Ã#ğÁÁ/9TA	 €?ĞÀÅŠHRƒTdp†yA€"X\t§¥@ø ŠÅF¤‚\T7î»ğÆ+ï¼ôÖk/E¤'ŒW@k/NÀğÄ0
+`t‹@€¿ó.r=dPD'!†W  ÆÆÛ»‹]PÁ3°ÌqÍA;ô¦“	&ğğ Ã;…`áNxã%Ğ`¦îF*½p¼±ÆÃ:ÄrYAeëgØ]ÊH¯Ã	¸¸ ‰A*XgN4ğ€*½A€â:º„ò0kàñ¤A\p1 xofo<‚<ÿÓ?T<£>Ñ“À½A@ÀD Â†€ m	ñĞfÜ+P<àAi¤«ùè¤—núé¨×K5ş\ÀsD`Y!ğãO0‘OTÜĞ6”`¨ãáÏ4/,Ñ@ dDØ  Jğ@©îÑà#° 3×>d Ta‚;¡å¬!'¬ÌR Ï€òP
+UĞ@u
+4P…d;$Ê±YX2 KC°'ÑÀ
+‹CR'±b¬`rXÇp‘‡‡ˆEJf!’‚$8ô!¬HGšá‚X9Ä:ò! âb&!,CN$CÇ´ÀˆAÄ\ÿh("'lAX˜ƒ7Ş@‡Ô%äØÂ/ EÃpÂ1†!:ÀA¯#]Ú0ğ†ç¸À†°Ğî"A8ÆpÑ tà@X„ˆRpñà"ÔEêÆÌCğ€k3„
+åæ@4°È@LbIA ìAóü aĞ_
+ÎR‘b´bK˜'ÊÁ
+Eğ"ˆÀy¬P%¨ %XHÄe8|ƒ
+À+X!‹ä£˜Ày@p…Î8@	 B@€†FYaéÁÈ¤¡ˆÈÁB@2ü ¡œÉ`(Ò~ÕÀOX'AZñ „ 	œXG=ÖP|}<GB§²‚<¢\Ó?  ¥
+p 8PCÑŒf Ë^VĞ€`Ø¦ƒ,Â!ĞÁUˆ78ã^µ‚€@HÓ $höñ6Äc‘õ‚¤à ĞÀ ™KÄ ÆÒ  Hè€°çD]´©PªT§J‘€  !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœxP.\ht È±cÂ! ”¨èĞAÅ•*S¦$ † ğ@cE¥M‰?4€ù‘B…Š?Àˆpp³hC"v:ğé ¨ˆ0Fm¦0!%L…i(óÃ$x”A5¥ 8Õ0¤ 0eŒ$Ø±#Á2²”íè A@¨(AÀ­†0FR8p t¬ˆƒÎ`¤9å)È^„`h,UM*Q¦J @vT)CÚ ³}Pá‰Eç²A¤˜ Â9"jtğTIº5”„±±`+n!šôªI‚m‚;4 1Â8A ,pÿ)(Å€ti(!@ã`icä°U€Ñõ*²T @#bª(aP ğB
+F”‘ BTCO³ğ“÷$‚æ%ğ•	F ±àA(¡Q	apCBtÁ6¤„€a„	u—m¸òÌd´8P„YñCpÑœGÅÜc™eXÁC[LVi¥DHXA ?\Y–zWŒV[^D8>X'‘F¨WÆh”)ß\B„ àT;ğp…€PfğÁAŞÄâ	D*œÆ[
+	˜ z©	ŒÁÊ	xXQ
+Jô×—b4•—Î Lt#Ãÿ’¨}yW&^Ä`‰)¼ ID ˆÀR¨5$ …œÿøPÇTp“…¡A	’G–yŠËŒ­DWX`CF"kî¹è¦«îºì¶ëî}¦ğî@AÀaÙB*ˆ`C	6ˆZ»AÀĞƒ<qïA”QF4l •êáD!ğ@f\P¤4ĞÀFÇ.
+û<R < I8™ şÕe»»l Š”ÓK3Î TC¨ÅlÍÈ@ ÔS		-×1?Q»áÜ€Î‰`‚Ê=4Ä`,F`@œ®Ä8PÁ4ÏRÌGaìkCf«+ÁÙd`Ïj*ÿ4„¼ó
+$Æànøáˆ'®øâéãÀ­\@Q
+SA—È²$:’A6­hÜP
+Yh@€!#ÇÌÑ@ 1EDo0d¤ÿ^©É¸b‰ #ôË+ —	ğ`B™&º"I9¨s‡ˆôøLq‰WÒÌù¬°‚½|Ğ†õùÕ¦–ÔÍäİ}2Â
+l@HkNŠTî^ÂÅ°Â\€‚‰€à&pŸ•‚ĞŠlğ¡ÈDg@ ”Ğ7X `àfè„˜v% € [qÜ>àG¬bN¨’
+sSud
+†ØÀd0‡`Á`Ò˜ÿø“€´'!pF0à€¤®$ˆñ:>DÀG)°xÀ˜!ÄNˆB)öà…c,ª ÔG5æÀ	
+¬ ÌàÀĞwX@
+uIÀcÀ`1ØÀÖ ?\£ şĞF`!>V°¢Ğ+¤‚2Ô H0âTbL`x¼á
+tè ßúÇ5ÀCrH‡ € :^G
+>!–W',£Ïx„$ ŒjÀ"O <À‹uãuXCÜÀ¤!|çO*ÈŞ‚è‚(GÁä	G@Ô°†fÔâTWŞÁi(Â‘+CÍiu¦Vœa/ÀE,±vm3 }`E9Ê‘ƒ$„ œÁ@Ò¤2]N8B p@ŠQŒ"K( 8@A8L PpE4c€ŠM!O¼F4d°<4c1Ø†8ø:È.(!ú
+Ñ1®(ØEP`K:õ\ !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹ChH¡AC‰‘!C†FIŠ€R¤K‰e(I BÅ#aÂ¼Üé°ƒ0RhªHQÅ€‡ğø¡DOˆ)R8=XÃF+; !J@Äƒ`J”Üá éÓ…U 0• €¬$˜›@‰V
+Z°z…”<Ú-Ø´ƒŠWö"%˜Âª\v(éZƒàJ& –ƒv°â &Ñ»
+qLÃ“K´hC 4€Ô|í14A x”v`@…,•T¸Âc..¸T‘ÅB™™t'X	Æ÷@èrSÌÿı¦ÄÁ+hxìØA€tÆp­ÔXŸÂA+k½¼RÂ@•dÑ`…¥ÀÅ?Tá€A)X€ÆHD[T ß?ÔU FkÄ)@Eq5´G@	J\øOy@Ñ0 Td„.Š÷œÈ¦â?`ˆğ 	U&Ñh$à@±;
+Ô	?,8n&@WL69˜
+?ğ`³i)¦H<à˜EBùO1Áøã	EÂıp9¦©å0$Ó$t‘
+uX†:©ùOçpÀAŞÄ¢GD&Ô¤q<Xa¡¡p8‹1œ0Hı`DGîhúúQ 3 ÿ’JD	p…&D–@ª’ÑF¤˜2@òHd·}YªşsJ$sPÁÍ!d™#¡`¤Ğ¬@ÎÈÕRä€4,¶í¹è¦«îºì¶ëî»ğªÚšÛn1×À°H1upì±"$à.#¼ÃÍ;Ü£J(!…V|Øîs0@j4¢
+@ ‘@
+&DÊ.Ö0Ğ„"İ¬¡…B plä\v6KÆŞÌ  'Ô¢K1•W» ÓÅX¼ËaPÁZ;¸«ÉÌp€#,ôk öœÆ+nğï×`‡-öØd—m¶ØÅœr©FaĞp®&í pÈ%­øùgm·)ÿñ•ªz´ÁÀ}ğñI+½®	ˆl¨¸0p‡°}´ğ&DšÉÀ†šÁ€«¨*„ªÛ‘À1k(È|!À
+¾¬‡3ıõšX¦˜äP<˜¸‚G,á>¤p”¥¡dLÀ°¼€Ç)íP…Y«IÆ+—0õg‹Ä)tä±Kñáÿƒç¹ì3 è}„ãõÃôğNK¼°.¥X„ü&Â¼!¹hÅ"v„o¼¨†°†5Ü ¹Çp±W.NPQ0¶ fôAœP€d Tdû`€+$ñ*ğáèÀŒ$båè†%ÿæ°‰q°­ pğÁ.–xDƒ´Âs°D9V dà‚
+Ğ…È‚¬ø, &
+ääˆÄpáy`Ñ DVğ:L GÓ915¤CSƒ4°ôùãsAêÀ t €éVÈAj@Féôƒ‚T0 õè…/tA… p`	Âˆ€ƒGAèØDÎ1À<Áh€%z±Pâ~¾	9pÑŒAl@Kh ğF„Ã8!(€„ b(H1&ğ. â„¨„vÄˆ]¸ xˆÁ#
+p„NäÙà 3B±:ÀŠÍ:1q@”¢(Ğ| ‡fÄ`˜‚A†±Hc9(Çh {lÒ dC6µG‡S  –)†B0;ŒbvĞA ¶ L²A  àb G+|ÂÜÇ´P‹Ax£ %[è 
+´ÁMŸR—*¶€  !ù	 ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹UĞH°£GC®ÔèĞÈSN$ À„
+)”è ²fÃ% Ğ ¢"”
+al
+MH@˜H¤àRAB ¬á‘bèB;ğ y°‚†2˜°R!‹Á!J„1â ¤«M€ Á#L‰Ãˆ ëÀA²°Qá
+$ :$H · 	¹=­¤åJ0E	4?R8 !ÙJAY4„©’B…
+$5 4&xÅÈÓ4ô*9¦Œ‘Å4®RğJ‰
+-ğL $ŒŠÕK€¡á×S. Hâ
+Ş­|½MİTÿÿaÁŠ‰~ ™P3vƒRXaŞÜ
+á‘_aÀuŠÜ(QdBJ˜ ÜF”‘–xÿ¡ ğ@ìUd…„;˜ğÃ”àƒCp†m@`Ô~ñÀ…{1hÕ5XĞàâ•…¡AapA)!L	"€†RØ(Vüğÿ\Z´†”	UA¤bQ%te6h@ \lä@bĞ=”@;ü F‡OºhDe4i i*(vœC	€ ‚5H†—8–€TíO@ ŞCËùµCF˜ åhá z@$@Cù5@IN:”?˜ÀQ£“š`„Æ=ÿRğ $mÊQ?XQD¤‚6p+”ÓÕÀƒ\€a€6X
+%FC¬'ã³Ø Ú´ )ñl	a†ÊíGd9î¹è¦«îºì¶ËĞJX¡Äí’áNÀ±ˆĞ¯¶«I+àpÃÁb(€\XaÅh¸ûÏPÀOj4’PI}qdô¢[ŒŞÌ H7kÄBByªĞis!ŸD%ŸœòÊIQ<,›f»wOjˆ¢ĞH#¡ìJğJÁŒsÏB$]ÆsÁ>>#ñ×`‡-öØd‡×e/G+=xp@'Ô‘öA‹ôpÄ;ÒÀ‚$ÇÈÿ=÷@áôğN Ìô¡:Ş´Ê¸<áÁ8?ÔŠ6Ò„Bª.ÓD#ı,AE˜óèğLŠ¬@$lğÁ0P²ĞF¤(3 f<$2 ÂN9¬ä Ç®xC”áÜğB9`£† ¾·ñÁ'ø’+åÌÅ6½éL48˜²Â:¸´q:
+„à±Æ( L]8B;Aœ XxCˆ&ñG!*ñ¨‚–“Æ9Ğ$8á}@„"OTb¨xö—Œ+…&â:Üà° G¶0…¿¤ÁğÃ9"Ğ„¹0"€¾@¿İP Nğ@ÿª!ƒ”"¬ˆNÑ?ÄÁ‡È¹†øĞ‡M "Ø@.Bë¹bÚhóp€
+_`òd° OTDòğ†7„€fØÃƒÈƒ8ÀŒ œ¸Ãá„úJ5¢1K”CüàCÄãÀ>Àâ¬XÁ
+°Ğ "DÁ A¸À"Ş°‡FÜÏ şĞF!€Màâ!Ã+æ€IÈ!@ 2€Çá	¹pÅ6À€,Î Á8F_jÖ°†^L!àÀ<÷kœxÁĞñm$’ Å˜ €5àa$`	ÚP‰fPÒ°ÒŒŠâ ÀúÀ4dEX…ğ‹SÜˆŒp¼&¼bŒÿèˆV# |xBŠ‘1Àt8‚Ã)0p‹F8ô àC0‘ƒr`B|Øçpˆ.@a'@~ş£x„7p‹: C§F•À(cá‚7Ä£7‡'PÀM£zõ«b !ù ÿ ,    P P  ÿ ÿ	H° Áƒ*\È°¡Ã‡#JœH±¢Å‹3j48Ä„Ç6Š”8v  1²eC~ Qa€—8ÉB@&`J8P˜BEÎŒ;l¨’ ‰2†rcÁ
+#4&LP€:yI‘ÂRj(Æˆƒ²j-È£el¤-H€€’)xP=xÅF+&€¨ òÈÜ ¬u ¥‚a¤4ıQ†¥AÂüp°Ø„.V‰é ^	‡\ıabÂ,‡M v`¤ÌåÔ5J€©±c‡5€q›ÂµÍß‡Öœ€‹V¬îh-Å€ˆë©ÿ©ÿ`k¤FŒ4ï0a†›á)k4cúêW*°?gu#õ'à@*5 NR”E	 ±D 8 Ö…‘…„aìE4„ TP‚õh‚ †4¤ .RU”aşc hl¸ƒb(%  ¨à V€…  „n?.„`Bkë) €¢Õà@k ah@¤â“ÍÑÒW4æ®DÁU°"rÈƒpš@ˆh§C&XÀÖ aÕ †Q†9Ú ŠP‚üEŠQJHaE‰š†*ê¨¤–:NĞÃNcª@)ÿ LYhğCB×L°Ì;¼sÄ(˜*…"¼§±ûDôÁÌ³ğŠ'¤&`@ed`€@AÅL¡::4 M],±¤ …UaÄôò ¨(ˆñ7Àä ÈªÁÀ-pˆX5$ĞZ
+H¤@Ú t¸ ÅëPÀJ“¸²Æ>ˆªY?òIš
+(IAP…TòÁ:İ°R/lPJ0ƒãv*œA(Ä‚G
+”³‚,–ÈPÇ4b\	cÙğÃ‘‘Ç2ÌÅIè Åfš¼õÖ{Åš‚Ï]P€4<µ£&@ ¶Ù–Á-F„„ÿÀÁß¿0Ñˆ©4kì±V$„Á4AÁ¯v†–ã«˜g®ùæ’qÍqÀyCA<ÑC6‡´àÇ"®P+[üÈ3jDrA‘òÄ­8€ 3TóÂ¥`ã)†<7—„‘àP€1Ì @ÄCa1m¬Œ2òÊô/ BJ+`üòPxO&/Ì  jˆQ<¸lĞ‹/²X6– PˆÑ˜‡)V0
+\x"áØFQcĞ¢ hGZÁ>$Áµ€›CàÀˆX|àÏF øQÑQˆ°G áÜAd{XƒºÀd#¡ƒÿ$@=L!DØB:æ:†dhbF$àƒahBŠ
+	" @X#,ĞH Æ§Ù ‚‡´Î">hÃ q(†g—à@°`0àq¸nP‡à  E0ã\` ÀC9èÆªq>‹<a	¤(‡)8`é¥¦D€&V° E@Hœ±‹]8C‘ñ ”¡V`¡t(¡ø"Æ p	<ø@&Ì Ë´‚üÀÆ:"¡"¦F¢øÀêXpò9À*!@@d‰\"Xñ9E,b1W<ãÄ4È:¥Ñg…rP Ò¸D3yøÁW
+òğ†L  …C6ø0EÀ|Hä0G;ªóÌH‚?±bÑ X:z!ÌÃ'5ˆÒP-L,=i1P §1ªP‡JT‚ ;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          GIF89a  ÷ÿ øøøêêêïò÷ÀÌßĞÙçãããëëë³³³ĞÙè¾¾¾¶¶¶¼¼¼ÂÂÂºººæææÁÁÁ¦¦¦µµµñññÕÕÕ²²²¿¿¿ĞĞĞììì×××¸¸¸±±±NÀÉÉÉÙÙÙÇÇÇ´´´···ßåï¹¹¹ĞÛíÀÀÀJ¶ÑÑÑÅÅÅÎÎÎ¯¯¯ÀÏæÊÊÊ°°°ååå¨¨¨ÄÄÄ½½½I³¥¥¥»»»ÃÃÃRÉA OÂÍÍÍK¸ÒÒÒÈÈÈCm®PÄC¥B¢SËïóøËËË£££ØØØDt¿ÏÏÏ‘®ÚÓÓÓ«««Co´§§§Cs½©©©D¦‘¬×ÆÆÆÊE©r“Æ§ÊI²ĞÚê®®®DuÂPÅ4i¼ĞÛìíííÖÖÖCn°K·Zİ­­­¤¤¤Cs¼šÂUÑÀÏçb†¾àæğTÍM½H°PÃİİİ\áSx²QÆÀĞéSÌCn±r–Î3c®‘ªÒCn³¦É‘©Ïr¼I´Co³J´ÚÚÚYÚÔÔÔM¾DtÁCl­Cn²ÀĞèr‘ÁÀÍáSz·3a§Cq¹3d¯#Yª¡´ÔDwÅĞÚé`êQÈ   3_¥\âLº¦ÈUĞJµDuÃr½ Ğ#T¡@¢¢¢RÊS}ÀÀÎäWÕ$]·Cp·Ck©N¾N¨òòò]äA¡@ÀÎãH±S€ÆäääG¯bƒ¶¬¬¬ŞŞŞZÛTÏXØ@Ÿr‘Âr’ÄF¬r–Ír’Ãb‹ÉcŠÉbŠÈWÔbƒµ3c¯b‡¾B£3e± Ï§É‚¢ÖCt¿4j½T·¡¸Üb…½àæñ‘«Ôs—Ğ#W§Cm¯ßæïSÄVÓM¼ŸŸŸ‘©ĞS{¸r¾áááC¤3f¶#[¯çççĞÚë3c­œÅ[àÀÎåb„· ³ĞHœSx³H²r“ÅÀÏåàçò¡Òr—ÏOÁ[ßSÊb…ºr’Åb‰Æ_êCr¼c‹ÊDwÈS~Á‘ªÑ›Äb†½ÌÌÌRÈÿÿÿ!ÿNETSCAPE2.0   !ù	 ÿ ,       · ÿ	H° Áƒ*4ÈÂ…‚…‡` ± IPØ!0€¬&N AƒÈÁpTP@Ã.-Ìğğb¡T	uL P±§ATP€gÁD1¤ZX@Ò}¸I³i!‡¬³¡D(¦.dø©‚İPF}ª€‡JÂBê)¡&ÊA·Ö°Rˆ(-_¨)óD!oZ¶fãÌÀgÈ¨µ&‡Zƒ^¹Ì¹³çÏj !ù	 ÿ ,       ´ ÿ	H° Áƒ*4ØF”…?  ‘ iJ4AaÅ@(äÁ“ƒ4àX Ï§2®¸â‡Bö\YAhà[ÅŸ@( À`¬á, é ƒÜÀ¼cµ°@Š"$d”eY¥,"<0(@š hÑ €0 ˆ
+õÄX³Ó ;f(ôrINœƒvè¨psŒ»Ú:a A…AUQr”–`.|Ì*kŞÌ¹³Á€ !ù	 ÿ ,       ¸ ÿ	H° Áƒ*,(`’a&°fÜ3xc(b'i¾€`ÂBNpnØxhÓ:d$0™°N-OJ#¤ƒBôÚ%4à'£Ñ£Hÿ•RÕ,ã‚!:IU%£§.ŞÉÑ+ã	’Š[p „^PH¥,4°ğpEa=¬,À¡€@3DP(ÀN!’×41ğ ‰ Ğ² 4(È €¬çÏ C !ù	 ÿ ,       · ÿ	H° Áƒ*,(€“aˆ‘jOD‚âT-	ğàƒ@!7È	J€ÀA7€0Qˆ«Ç†-E–i¡Š	€ô¢Ñ£G5Ù˜rÑˆ‚6IwÑ“ezrñAHÃŠ=@ƒˆ Xx€Ä‰dÅ€ğ 0Â
+0( @`ò&40£ÂIÂ,éûoG.He` á`¬À
+0¶¼Ù²çÏ !ù	 ÿ ,       ¹ ÿ	H° Áƒ*4XÊÉœ…¤ê‘ €}y©òK DÑ(´¤¦‡Šƒå²\Ê§pÀ—[ŠÛPc×BÎê{" ¢Oƒ 
+¨b@Ï‚IX@xµpÀª*‹BÀÀÅB2ê•0˜¢ÂMueQÔŠ
+ùÉV  #J°pÁHælÂ+Lô;8!?
+¤hpA Œ!$NèĞV†mFh° ³çÏ C/ !ù	 ÿ ,       · ÿ	H° Áƒ*4h¯…•ˆú‘`€ÌÓ
+Ú@M„(<À€ƒˆƒ0•±§0hB"h<øÈLÅŸ@† À 1) ,p.£‚ tÑbá X*Ã€‚R…aºg€ƒ¯AÓ- !7sD&¤qàÊÎ‚è6Ô£ğ
+(Şù$
+ËÍB&¢C ‚dXF]‚!¦ÚNl»Ì¹³çÏ !ù	 ÿ ,       · ÿ	H° Áƒ*, 	„ &, CÈ b€%(8À’ …^T@"ğŠ	ø€cL¡!' ¡KÎ…VtIø(NÆ£H“şc!ãAÆX?lBä@FğŒğJF~1˜(K¶à„ 	ÉÈ# Ğ‚âé¤›B4 "If€@*¦şŒZØKÌN¤ ù'`
+µHìÄÆLYÅJh	R¶³çÏ  !ù ÿ ,       · ÿ	H° ÁƒÿHÈp  .4dXà ‘	 pB  2p ‚†<pà±ÅÂ¬˜ğE‚68a!AÃ9H° hÆ£HÒ€À ã1Rf „qâª?Î"!ã¼t’Š{ lĞĞ›H Êş°6…¡ ÕŠ0@€À•héMˆ`–'Á:5M º"ˆ‘sGYgrŒ
+r¹³çÏ  ;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ‰PNG
+
+   IHDR   î   ›   e§P   tEXtSoftware Adobe ImageReadyqÉe<  hiTXtXML:com.adobe.xmp     <?xpacket begin="ï»¿" id="W5M0MpCehiHzreSzNTczkc9d"?> <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.3-c011 66.145661, 2012/02/06-14:56:27        "> <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"> <rdf:Description rdf:about="" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmpMM:OriginalDocumentID="xmp.did:0180117407206811822AAC76958E5BC8" xmpMM:DocumentID="xmp.did:FA4B0F04BBC511E1BCC2E5B54CD61AF9" xmpMM:InstanceID="xmp.iid:FA4B0F03BBC511E1BCC2E5B54CD61AF9" xmp:CreatorTool="Adobe Photoshop CS6 (Macintosh)"> <xmpMM:DerivedFrom stRef:instanceID="xmp.iid:0880117407206811822AC55AA5AD8061" stRef:documentID="xmp.did:0180117407206811822AAC76958E5BC8"/> </rdf:Description> </rdf:RDF> </x:xmpmeta> <?xpacket end="r"?> €y  '&IDATxÚì}tU×•ö~ê] 
+H`DÓ›±˜jN<Édâšw'1­dâ‰³Oş‰Ó&ÁCbcÿÛIœ±Ç+`°1Å6½÷*@ ‚ !¡Şôşó½}¹ºº¯©ñ$ö·ÖÕ»õœs÷9ßÙûìsö•ƒZÂ¡¶Óê>ç @ĞÑp¹·µ5š6—•¤VÂ†©-Â½Eª-\È+t:iëÕV«¶:÷æ4Øa"m¨›¬Ñ³gÏNùå——¦¥¥İ"":	T^^^qñâÅ­O<ñÄÓëÖ­» NW»	R»˜¸¡ní÷â‹/N[¼xñßâââ"E„ÁµEEEEík¯½vï’%K¾Â¡[7°ùM7eÊ”Ö®]»U‘6BD&yëæÎ{ó¶mÛÎºÉ[Ç&rŒÚ’÷îİûúØ±cgˆ¨‚àÂ¾}û67îAµ{YmUì9†Yœ™™9YD$ÜÜLps5„‰Ó86)))FD$ÜÜŒus5„çi1å%Şc 8áæf”›«¡8âqn˜ˆG j„¹¹ê`âòâ@ÄŠ—ùÊd•UQAğÃà©hY ‹ª^@ ÄB\@ĞñÄ-))¡î¿Ÿ^ıu‘®lØ°~òoÿÖéy¢^°¡<áwŞéÔ²¡<Û·oÊzj¯²ÊÎÖiá·½Ğîs·ûöí£¾}ûÒ†õëéÛßş6EGGS-˜9s¦Ş:ï¿÷ı³ª•,şò×¿m=sÙÚ]ã~¾v-Í™;—iÛ¶mÂÒ Aii)¥¤¤ˆ º	ÚUãÂÈÍÍ¥±cÇÒ¥K—4qí4Lµ%O=E“'O¦óçÏëg†A?ş8õìÙ“ª««é¿ÿô'Ú±c‡¾Ÿ¯A›#ÍgyFŸ‡9¾g÷nZö‡?æ`NN=øàƒÚÄySõ˜h°Àƒ‹eÙ‚49¢Ëğıü ™IyøĞ¡fçş°lİ8r¤~~ÕªUô¿o¿­ÏÃ²X¬Ò8h~÷çŸŞHùUUUÙŞ‹<ĞÁıÇ/~aû®ßùÎw¨OŸ>ÚlıêË/iü„	Ú‚±¾‡Ö²İùµ¯ÑM7İ¤ßø£’ÓÙ³gé[ßú–_õ‰²½­Òã¼híY³fÑ~øCzúé§õûpİ/]ºT×dÿñGézµ¾“9ú½ïŸFm[çhvÏ˜ëï¡‡öú,Ú	¿ÃÂE‹håŠôÜsÏQÑåËZ&/ş×÷"m–1—-%9¹EİN™2Åï<q-¨5îî={´ QøáÃ‡ë—,((ğxyE=ûÓŸjÁäçÓ–-[ôy4ça®ÄÇÅÑòåËµ°&Ñ@Z“ó ©û÷ï¯Q!ÿøoèçQI¯¿ö<x°…)d&(€<Pœ~qŒó ˆôğ,,4Vó˜×ú)âàŞşèGúxĞàÁú^+Pùü®¯¼úªA0³¦¡*i€4xÊnk.ÛÕy"”M>4BIËò„Œ¹Ğè‘Òü‡ùóu}›ëçP6t˜·Üz«~æ—¿ú•®ÛO?ıÔg^Ç7äPQ^N~ø¡OSõç©½°\ğ(Ò=uêT«Û7×-HHAo*C;@3£FÒæ2*Ã@ŒAô¡C‡Ò™Ó§uÅ£§)¸÷™°è½ yAN4jtÈ×pÒÜ»w¯Î›5´ÂL¥%víÚÕ,o; <¸y èLpŒóÚ‚Pû¬e8}¾7n\S:1MV_lÜ¨5¬€e&B²FC§ ÍˆwEĞLĞTÜÉà= 5aJF ˆ`×ğA,.Šg¹3líXeæz˜0~|S¹•%÷D}ã°A‹áŞÏğXZu[YQá—9¿VY"¨KX#™·¶Ã2ôÔ^ĞF —iÓ§ër l.lµ<¸n;3Ï7•ÑĞ xhlæ1¯'Ó.&¦eaMMM“©aI‡*æ0› è(ÌÇTee¥.›ˆÜ[ŞŒéÓ¦iíˆr¯Y½š}ì1}Z`ƒª³éhG|n°0©P‰Ğ|Ø@,³ÆcÂ³>3HHHğKşÜi™g!‹¶z£1ì¦B&$û1 {6…Ñx7mÚ¤÷Ah«ì=uxgÈÏ Ó|µ_íu–ššjœËÌÌlµ,¸n:3Ï'.´™u¼Èã>ü²&ğ…¨¨(ıZÛŠ$ÕÈ!,äÓSôèÜpcccuCâ±p @YÑè_xáÃz ââã=zfí\ıfï1?ÍÚ'#Cÿb¬Åòa3Ø[Çb¼/fFYY™–…7 \ ‹ÙÀ{cïWÖÌnÈšã7¿şµqß$UËĞ><´øñ¿ş«¶L7LI6!}rÅÆã~Ô3ê×nlìo{Á»pÇäååûæÓ,û¶¶Qkş¦Ûé¦2›·Í˜Ñ‚ p’˜ÇBşôj åÛo½eŒÑ€~ ÆgÈGŸU#…‰Ù¯_?£Rq<ÔmJÂ¤„v€¶`€¹I>öhˆH½¾Ù<ù˜¤0=ÍÏY¯±™köìò»¢ñã]ñ~şóŸµÌùÙÑ™ËMÅùAf°:Ø¼ó”÷ÁbBş *:D û›ÃJ€ÃqåÊ•-Æ|è°q§yâÄ	ı;oŞ<ı†fMí	<9@.<ä²sNÒ^´oBµM–†.Æ³îÎ‘‡:+ÜÖA[Û¨5O(– Ô¸0—`ÚØõ>  
+¾H™‰şÎé²—göÂƒÉÏ³“Š7¼®………‰ÑaÀ'	›2Ğ Ì¢¡šÍæ¬Æƒ&¯²—5»Ú22w ÖwE§„²:ÿm-d†t¼i+.ç%KÖ¤È^c ^pĞÙt…ÜÏ©18ŞeÄXÎlF"½ª…Öe²‡³ÆĞ>.^¸`Èùù+oíÅ*³‡²a‡[qx¶­myÂú±Ë³½€¡8µõRÛ —ËµZfÈİ<|ƒ÷}`€VÍµ†Ãá˜¯~ !
+e­²@Ğ!Äº ÄTÄTb*!®@ Ä X Ñ«G::İ\^äƒÉõ`E{g·gw[åz->4 Äµi˜ŒçõíLpczW)oGü5ËZÙk™N{Éµ#ëWˆë'°·+¡+•×º6ùZ§ÓÚA°£C§ƒx•
+«U°>ëqyı*–ÃÙ}âÆ[@;à-Í8ñHéaYb$±ÔÍøí­¼ĞDX4ˆ„Ûa)9€ÜS`½ÌÁÕ ²y
+ú÷öÁ¬¯5G¦ &´½Ò±ÂS€>òã¨'s5Æ9P¹š?4àíƒfp@ÒDÛBz÷İ¿.§§p°·n?ˆÚâÈ$˜÷Ööê-Ü°CÉÚYÓA¼f@”¢a^P• c²Î>yÒvq··€v3<4ƒœ¨„èû8Zƒãƒ©_¬qöV^& *„Dúx‡wŞ}×¨p_õæïŒï²Ş½İôüÑˆÌ)³ûà "á9>àO:våö o®!Zïeı`A repP>ôqH‹wòôqt Ô÷B\NO@:?ÒDùpÏs'ü‘·W<öŠìºpN1²• ”{ï»Oƒ\hìè­­Î+oíæŠõĞŒè•#îmÀŞ²y3Mœ8Ñ¿1µ)x ë¸ùã±¡! ÇGÒğ³ĞHs½I;Ø}pÀ
+?à+»rû
+ĞŸ:uªşå W´E®æ6  óE‚wÓ$÷8rq¼3îÅ1êÂÛ tğü±~?n¯è8BÏ£­!òZ£SÿCW¨9TËm5—=´3|4#¤!fè0æ«éáâoèœ§˜VëÍ÷¢7·äéİ»w‹üp¿UFŞĞÖx‚· }Qlí—<}Å
+0ŸW«º7Gğ ã·÷³~t Ç<~÷ôA ÈÕ.ş˜G::•¸\Ñ0_Xğ,N¶šXví_Í\	+D¯Ê½;¾dÕŞ­·Àz»{¶fEÖ€Zû[IÈÁìÀÓÇ¼}GÙZ ßÃ-3óxß¢²g¢\Öc|¸ÀÛ NYÓáı$×•W™¿2 ³fÈßŞ|SŸƒ9«?mã…DvífSÊ[@3€–aÜÅÁáüÅD|TÎWy}!Àz³ó\&æ)álC€=´?Çè"”ÏÓ7±Ì@£äFÖ–˜Ó±+wkôÛ"Ws‡yò;2DwÄiii¶÷£\|/—ñÔŞ>ÀrcŸç1.·W8?¹ìP"¨·n¯qátÀæ4ã3ª1ÁKÇ&{•=Á. İ_A÷h` ¾–0a=ÃZ^¯c4/õv÷b|Íf4›|Ö ³7Ø0NeóZÁÓÇMÇÜ‰zĞçÏ¯¶¦ø;Ù £æ@»1.Æä¸yÁ¡†4¼} ïyówÁÌAïƒµ½r½™½ÑæÏ»v‹é  ³Àæp{,Ü0[9˜ ÑAü?•xŠ‰Mmş~Y°"LªNp=C&,ôá!ëÊ×·º®¹öSY èSY èââ
+B\@ ÄB\@ˆ+'ş.Bq»\%§ÈUtP!âv)„†SCÎZ‘ƒ Í•S‰Š|é+¢q»˜¡Lù[ˆ¢zŠ(BÜ®‚Æ³Ÿ“«<BÒÆˆ0BÜ.úJrnùwr(mÒo¶ÈC Ä~¹ê×/!Wi…}‚(,Jd"â·}ìT¤}šÏ|J”)tô#"A»@¼Ê…Ú+TÿÙãÔ˜¿™ÑÉ>ïOª›q„¸Ák§ú5‘«ì,QD…Íñ™Íï©¾L§>&
+¤şó4¹!îµ²³?¢ú?$rV+2¦P8H›võCw®‹û©áĞÔXtÂnyB2§‰ĞBÜk¨gÉ¹ı—Ô°÷%}äHªHû†¡i¡}áYÆ´Pè˜Ç(âŸ(m!bq¯š­§úuK”éÛô?BúÍ¤ğ9/i3h8ôgrnı¹’v4…/xS´¬@ˆš¶~İSŠ´MÙ¸H‘v™R¹¡MZø«ŸPÃá¿’#¶…ßù.9û‹Èm†LµûÿßUÒ¦O ğÙ/ºIKÚli),†Â½%¤qƒÎrîş½[’a6Kí‡„7éáÊäÜù[½:æarô$òqƒÂH.>FTWÑ$È¬P5ëê°÷Ä{z†¾Ö{ŠK Ä„F^d¯æÿk×Uzæê~YÈJ Ä8’†#†ÿsœ£ùEÓ‚Š†ı¯ª?u"078˜Ú8 ÓøÂæ‚Í¸Õ¤}sÔXx©ÈK ÄkùÆÈ‘2’Ï¬!WuÑUÁfNÕç­»÷ÔX¸S&âs#(|îu¸^Ãö_™Õ1…ßöë«®FjØö‹)Â/Ş^O÷ÿúm½=ûÆ©!®À/‹9q€^“Üı5æ~qõ|ê(
+›úãÆÂİ’M]=UÕÖé­Zí„¸Ùk’&¯sÓ³:¤ÏPÈ#î¥´qMD– 7…™q+…Mÿ%9wş®¹FvO…|P„$hÈZå6 ¡±‘êÖŒ¼ÈrUä“#.£ix«öX:îIi\.£½§ò©¢ºb£hÒLJIˆ!„¸mA£ËE‡s
+ißé:wñ
+õNJ a}ÓhtV¯bt¤Œ2ö]Å'ÈKa³^ôøŒ:g]¸RNãfĞéó—é­/öÑŸí¤ûf§E7h—ò×«<NäQÎ…bº\V¥CCC(½g<îß‹2R›İ¦°˜.•VÇUGâp´H·¢¦œ½`ÎH¡qÑÆ1Ò8w‰Î—QyU­–c\tõOO¢ñƒ2(",Ô¸r-¯®¡^=¨¨¬’†f¦êgñ+â„²ªúdÇ1Z»ç„ntÌ™Hß1–ÂCCıxÚ¥_Ga3g{Î¤+5Ô'9A“Àşè½ééå+òî¢!©mj¸¹—®Ğ;_î§]'òtá	·ŒèOß¿óŠojÙE´|Õ6ãúÏ¿3FôKoñÜ!Õ™ıæİÆñÒÇïÔÄ]±ı}¾ç$å•zÌ3>:’\tMÚ×8÷şæCôäÂ[èçûœşÏ7¦ÓoÿşıÏï‘†(Äõ.EÔQºRY£ÓzÄés¹K©G\ÅÇD¶ pm½“œÚ»[©ÌŞÊÚT*;vN´ZkºËå•t¡¤‚ŠË«hÚÈ,ºë–‘-òMˆ‰¢©7fÑªGiÇñsm".4×–#g›‘%&*‚jUùø½€-Gr(Lià%_Ÿª'éK¯(âºÜ×wËµ%nŞ¥«8Xso;zÎ mhˆC‘9Fkx¼w½»)¯®ÕÄüÍÃè†ôÔ/­‡’k4%'ÄĞ$Eæå«¶jM/â‡2r÷ÚxàTff2÷ş¸bK@i„+S09>†zÆGkó:K™ˆ³Ç¦A}’ífkš«ñ³3;Úæ?–™F³Æ¢‰ƒ3i¸"^BLd3Óô÷|©¯¦ïÎH‰jŒq›ªÀvÕ|÷ö‰-‰kÒ¨{'æô¬1MyĞG“äÕ&{C­Ùu\[ì'X­_Ğˆ1gÜ`ı{Çäatû„!º3qÆ€ŞIz3ÆŠªáÁ¼…	]ã3­­oĞZ6&2\k•(EHŒİUã‹
+üó4ĞÚÛ”–æ±e[­Êô=eÚî‰…7Ó3¯­fÃ^KÙzëãÉCûÄ½x¥B_ëŸŞü_¨œRcrÆ >)ÆşìqöaŒ°P0n‡‰óÈQãiÆğ¾Mk¿›ÒqÛ4<h¦#ğÚ§;©D™Öó&ípÇÌ€^É-:Æ]wuÑÈvÕ™˜‰SŞp†)í	Y½’â¢3±CÄ[÷Ñc/ş]oÿĞÊg•Ö2“£™y¬ÆÏ íç{OÒ¢)#èáù“;¾çöbŠÂQfö6c¼m†ŒĞ¥=ì~CÈ!I4nç ¦ÎIn9¤Æe.zúåôt)p&YU5Šœ¥•ÕTVY«Ry—Jé‚27áÜê›ÚƒÏ›D£³z÷cÚdÙG›µùıïÌ£oHo÷²CcîÉÎ£\U–ËåUT«ÎùÒvĞº¸Ç±0•a2ÃI8}şª‰Û/ÍvÌi%8ÇNä7M	U×:µ7] Äí4Àkú«‡hòîÍÎ§­GÏô<æL(„‡wcJxX×)›¯LÎ»gŒÕhol:œCÿ½f‡—
+MÜÍ‡š™Ë° Ìi3ÆìÓì¹Êš:ziåVÚ ŒBÜÆxOß5MkÎÂ’rÊ/*£âŠ*½¸ ¦0#"<T“ŞÙÔÄXJïßl…éÌ›8ÔvqC{`³"íïßÿÒ808“¦ŞØ_›Á	nsÿ‰eï{|N"ÌËbÌ­‰{¼‰¸EÊBÈ5MMru.âŸ½ù>ßät‚ğ°"’âc´ãnåö£zºK ÄíT`ªK1ÅÓx›j+šÆÌ;Œã»nI÷Íğ{NT¤ÄàXî%½ZjÇ‰\ãxİÍcáõû²ÒÆ)Òşö‘…”’Ø|ùfl”|^œS,"øÏ÷¾ ÏUõĞ¬r—SXÒl‘Å“†µ*óÊ&¼Ç‰¼K´Eir‹˜±ïÔUZ¯¹N”5×ªqQ)ß€™‡ËVµmPäí•O‰1M‹`"Ng£S‚ä¿æ•ê1í¼	ChÁäáÚ|n/¸l:	 ¬ªºÙy˜òÖ:¶:§pİzÏÈşént<0¿å^lÒÈj»uDÿfÏ”U×šÌf—m»rÚä+S¹C±ğ¦ázµ¢y° Á¼ÁvÏ¥˜ÈúGe¶vôª Ë”V€ıÓ´ÑÆ1Ìë‘=Şr8ŸØ÷…J‡i6^™áY7#Ñ”/´/–{öpÀ·Bu|m="IˆÛ1À|+Va¼¦ô†^ğœ5?¹{—Óîì|½ SĞ®ÕuNc†áy¸7Sÿú§õ¤‘Y½(#9Ñg¾Ğ‚ş1ØÌmƒ¥† Ì·cé¿ØO»OæSz8”]ĞÔáÀ1ÖèCãÁ\fâšï\¨¬+Æ¸JrXK–L#ú¥éñòá³´ÇY–2
+qÛĞ «v£gÎÓÌÑiú¨,=÷jLä“‡µ{ş{³CŒˆ!_pš¢~°¢Ëp`(¢`IãoßıÂ0‰ÑÉ`°hâk7ĞÀ›ë÷xÍŞh¬7†éË€LFÚ,º˜1f m=vÖë‚¨;İ«¤ tdO}íVzşoŸëkã¶ĞJßtPï£ÑÏ3°ÓdƒFSzışSô½E7ûg©É•š×ì¹ñÊÄıÏGĞç{³õbx„D0,3•n=@{ÆÏ]ºb¬æÂ4‘]¾ÑaôĞ¼ÉÆ´0‹D0&¶Ü‹ã™I›ÑşRY¥¶BàÇÚë›”ö†ö½gÆXí<C¤•´½À ybºÍA«¯w<úâ{Í'ÖÔb…æo{õŒ×ff¼)Â&P`Œ‡5¾EeUz6¬÷…D@Àm£èhÌu¢1cµÊà	ˆ±}à7oš3!İ¡¡¡óa4©­PLe~÷è"™ÃãV,Sühëáf÷`î5&*œb•‰	3ã5,®€éiÃ‹Ë¿5µz‘³c³¯2³z'éhœûg×š 	wÌÓŞk,ô,;dÒ‚ìæ©˜Ê×b!g¨7³–ÄZb˜uĞÆeêD¬ª­§jµ8X›lÄĞ*Ã)¢Æ„ (6„÷%ÅGë€òôqz5‘²ÇÒDqwvÂ4¹=ÕÎ~hêT0O“VêQœSjòÔB">IrPïd=.dÕ¼¶Ğ¸ÅŠøˆª‰|¾¸œò.—ê/jÀ|¾!­‡6ËzÏlµßÓgšpşp¼,îÿ§i£¤²®Ç1®Óé\-"ñ¬ÁÅ˜óÔùbÊW„«ªiú9éá¢Á¢ha³¹mó×±ˆ¦uÕ	$%Äè/c¤öˆÕSEj7›ÚşŞïÍGrèÇßšÙìë‚n¨eÃÂŒ1n3âÖ××q‚`µüÂÃâÊ,¸@ĞÕÇ¸âÔºDã
+¢qh\@ W +Dã
+!®@ ¦²@ +Ú•¸" ë—Dã
+b*_K444Ğ…¨²²’êëë¥¦¯#„‡‡Sll,¥§§ãs/b*wÔÕÕÑéS§ÈétJ+¾N»¦¦†JKKiÀÀÑ½‰Û]Lå‚ü|]q‚ëè¸Ñú÷ï/¦rWÀåË—u¯+ -ÜpÃBÜ® Ñ¶üİqšÓ2Æí/ˆ1®@ĞİÚµÛ=^ª¶¶Öãµääd6lõéÓôÔáÀ8xğ ?^_5jå«qÑÉ“'iìØ±Ô£GÚ¸q£×üü½ó†×óâÅ‹täHëÿñ—Õ
+.{G`ğàÁ”‘‘¡åÔÓ9á¯Ü€#F´Z^İq–³[šÊ4nBBM›6Mï?~\ÿ0€¦Nj4ÔÔT*,,Ôià;É‰/˜˜¨Ÿóuß!Ct‡¼«««ÛdàÛÍÈÓ]ØpÈt”Å©ä‰¼9»sşÂ_¹İvÛm”™™Iûöík%q]BÜ®2®ñÔkCÛ}òÉ'Zã§N¢;î¸C÷üEEMÿ-¤m‚qzh<C‡ÕÓĞĞGÕÚå†û"##iøğ¦ÿ`gnhx¶gÏ¦o%#ÍÜÜ\}ÿÀµ×“ÓägpJJ
+Ğ„	š]c‚Ğ®ÖBdeeég¡•AŒ¯¾úªYùÏ=ÛLƒA6pâà^t,yyy-äÇ?äÍ21Ÿ‹‰‰1òE>qqqtâÄ	-c³–íİ»·~³ÜÌe ø}Ír»ñÆéÌ™3º^ü)ow&nH›¢l¨L»­oß¾T\\¬+™ÏaÿÕW_¥;vš×úõë§öÑØæÌ™£'ö/]º¤ÏOœ8Q_ã†­3oŞ<İ¨@sŞxĞ«W/}/ ùYÓLJJÒÇÈ	¸L¼qY‘.ÊÆ®@ü,Ş÷ ñãe(++£É“'ÓèÑ£õıøÅ1Îã:îã´Ìÿ§ämwÎœ/:'¤…÷ã´®Ãyˆòà½ØB‚,¸¸û@~;¹ù[^ŞºK»îöÎ)O/ i !=]7÷0!±M¬Y³†®\¹¢{}40ó}Ó§O×„ƒFÇXÓŒ½{÷êÆ‰öşûïës³gÏ¦ŠŠ
+Zµj•Q¾‘#GÒB@{!=OeÅã¥—^2®¡Ñ¾ùæ›ºœhÜ ÒÂ1Ê	Ó}Û¶múãÓµk×RTT-^¼X¿¯YS²\8o–¡ù#''‡¾üòKmÅÜsÏ=FZx7óû>ğÀZ+#-htª(Êm
+R¢Cµ“›?å½œSİãa†zrZ¡Ç¶^OKKÓ¦3ÆÀ@yy¹¾‡Ç^Ø‡	À	cÍƒïã‰~˜nlŠÛ½ùY4Zhf>ÙÑhA”Ø´i“íûpY÷ïßo”‰Óæk;wî4U\~4r«¬PlO>ù¤q÷[óå! Æ×ÌçÌ2\ç{8-ğyùâÄ!aæ³sÑ®Xnş”WÆ¸]UUU¶çOŸ>­DÙÙÙúÌ®‡zˆ6oŞLÇ34,Ò`m‚}NÎ4(42œÛºu«q4 LÃ¯ıë´téÒù›Ó ]Ğàø˜—æ•””f$±İûpãF‚Ú]ã÷0çùì³Ïå€ñÂ/øeÉ„……éñ9³'ïëñññÍäg}_îLp¹´Ë–-Ó&7êÄ®)¯·‹+ÚŠÏ>ûL÷ì<òíÚµKŸÃ˜À1ÆSvi`Nş®»îÒûwŞy§v”€ğŒ?şXÿÎ;W;… ½•yÂ£½páBíƒ
+i"}LqØ½¹®¬×í®YË_td/¿ü2>|XçrpùÑ	ñû0`ÎâÚŒ3Œ<@8	¤1cÆèsHëÜ¹sÚzà¼Qk>³r9=8ä8ë»M™2EËÇßò^GÄ¥nM\4 åË—Óí·ß®	ÃŞË•+WêkpˆØ‘û }tt´Ç2Á^yå•÷}øá‡4iÒ$úæ7¿©ÇµŞÊ÷Ö[oc5ã/ùK³†ì‹¸v×í®YË÷Æ9\÷İw0A×­[×"]È¦;dw÷İwÚã~s™Ñ!ÌŸ?_qq?òÆÖÈùÀ‘Çò…%„tñ®4H_ƒUƒ1.®Á’ñ·¼İ­]›ÑìŸ~œ?ß-şé×ó?û	:0A* C6½ÇG=ö}úé§ôÁMyŸë&í¡OïŞöÿ‘¾»xß<õ¼‚ö<ê»wïÈ
+¸–¯rD]`êjõêÕzLuĞíÇ¸İe0 ¯¦Du>ÌS@ÁÔHœS]˜O…çQ ÀZôîdĞMÆsæÎÕ«h<Íç
+®`>mAÆ¸]©i©ôÔ’§hÅÇ+ôò;ë‚A÷¼Ş°ºİ¹ˆeŒÛ•€e÷Şw¯´âëİô“ÃòAt uCVâºš,e¡®@ĞÈÂ¤%½nA.Áw0G#ó5Ì½ƒÙrgqqqmrrr¤ˆI .\¹ráWõn®ºBÜ;8Q“}2[&?‚ „››yd€ï‚$ª­Â¨W¬x£gRÏ0•@().qŞ¹hÑw
+
+ğÅ„µ•â?"9ÜcİĞòòrG^~şù›&O¾%&&Fşéµ@pq¹¨ÈùÜs?ûå={#ŠÏª`QB]‹evòäÉÒ>ø`OFFŸ¡¡¡	III¡7»e“M¶ÎÙÎæäÔmÙ¼9ûÑGııû÷ïqkÚµUÃåpó†S
+±¹)0›Õ–¡¶^Ê|ér¹Ø¤:‡Ã…íÂ…yÊ,>ªNª-ßMZ|;¸Â=Îmà±,ÜÌuîğ2Ã÷Œ…¾%*‘KC‡½5***¦;Çét6ÔÔÔÔ[VUUU§®5bŸÏcb[ª½$çª­­uVWWó½]Şò---­ñu_[ë’““c[û|DDD˜&EpZ~68,3lÑ>¸£TÖ›mÇ.>7TÛ¬:pàÀf7Qyƒ¦­ts´‘,•Ãc]8«bÜÚN«DÕÒgÏ=%ÖüQ¦!U£"W__ïTÇµÜĞëêêœ5VÒ•””T«{L„p544¸T¯UanGæëöÉæ¼ËCäÇyò’g‡×dqQ ´<È½›¶DÎy*_‹g”²KMMö”–ºë@°éTGeéªóÁyëıª£Š»æÿ»RaİºuÛ._¾|(÷VáV¢õtu×¶’@^¼p„›À k¼êfÎœ94##£—÷öà›ËÊÊ*yÉd¨2­d­…óêØ "SCaaa…‰ˆ999å’¸lHcw®ÑÑìˆÈ9ò@hO¤$?ÉÛYÄmi}ÖáåØá¥3!×üí>:‡—NÄáíey„deeÅYHîèÑ£G´Ò_áÖôRRRâ¬–†êx"p¯µ£HHHĞ_QÈÍÍ-Ü°aÃqeÁ•¹P•nÂÖ¹-àFo‚7µ/Æ¾Qj‹vo‘îó¡6ÇÁ\~lÀuj}‘1Òú:&?óê(âzÛoı%½¯k?ïqx¹ß@‡á‹¬¾Î9üèBüÈÏš>/~ªw]«İ[]³m´³èÂ¼4¶F7ÓÍÔ™Hb)€Uú"&µ’œş’Ì—‰ëò“d¾ˆÈ½IÚÖ´-dõGøJÏá‡¹îğ³œ9-H‡`÷âå}Lä­3mNO¤õUAfÍê&y˜{?ÔæÙ¶š¨şjÂö"«ˆÕ#q;*GÓo¯Á@'åÍünM§à«¼.yî­ÁiuBd2¹í^‚	bÚ'ëÑÚÓ'¸¶P[ïë(òû{¯ËDÒF›¡eË­8æg£çD=9:SË	®¸Úù¾öî4­¸îIãúë5ğÿ ­vCÿó    IEND®B`‚                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        ‰PNG
+
+   IHDR   î   ›   e§P   tEXtSoftware Adobe ImageReadyqÉe<  hiTXtXML:com.adobe.xmp     <?xpacket begin="ï»¿" id="W5M0MpCehiHzreSzNTczkc9d"?> <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.3-c011 66.145661, 2012/02/06-14:56:27        "> <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"> <rdf:Description rdf:about="" xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/" xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmpMM:OriginalDocumentID="xmp.did:0180117407206811822AAC76958E5BC8" xmpMM:DocumentID="xmp.did:E4F96D7AB7DE11E1822DBA4D96655069" xmpMM:InstanceID="xmp.iid:E4F96D79B7DE11E1822DBA4D96655069" xmp:CreatorTool="Adobe Photoshop CS6 (Macintosh)"> <xmpMM:DerivedFrom stRef:instanceID="xmp.iid:0580117407206811822AAC76958E5BC8" stRef:documentID="xmp.did:0180117407206811822AAC76958E5BC8"/> </rdf:Description> </rdf:RDF> </x:xmpmeta> <?xpacket end="r"?>MƒŒ  1…IDATxÚì}wx\å™ï;E½Y½Ø’»$wØ`0† !›¡$˜MHØ´{ï“d³É>Àİ›%å!K»YØ$d“À“@°Á€1¦÷»dË–­Ş»FSîû{g¾áèøÌh$$[}?ƒgÎ9óµóıŞö}ï‘.„»ápÎÙHCCc´á>¼†Ãg&©™°N>bG1š¼´ı|ôñá
+n#mÒ:dMX³fMî“O>ùhNNÎ)))Év»]©†ÆE‚×ë¥ÎúúúmßúÖ·¾¿yóæ:>İ 0HíSÄu´kòc=¶jİºuLNNÓC¨¡qiÑÙÙÙ÷ì³ÏŞù½ï}ï}|ha2¡i“W¬X1uÓ¦MÛ˜´±zÈ44Æy]k×®½bûöígäu)9‘Ì}ûö=WVV¶Z•†ÆØÂşıûßY¼xñ½ü±‰n9†Yœ:eÊ”åzˆ44ÆÜLpÕ®ˆÓ8)###Q‘†ÆØC€›I®ÚÕ:-–|âuôXCcl"ÀÍø Wø¦ü\§1g€«6E\µùBCCc+^ÅWEV½+JCcì#ÈS­e54Æ©êÕĞĞĞÄÕĞĞĞÄÕĞĞøäÄİ±cİs÷İ´eË=z!ğ›Ç§^xá¢Õ×ÒÒB?ù—‘ç®^Ü‡{ğG³ï¨Ã|à<êÿÎ·¿MÏ=÷Ü€ßTWW‡œS{,/Õs*§†¼v»kçN*,,¤íÛ·Óµ×^«Yjoç;µ¾ıû÷SUU=ıÌ3”pÉûó-·Ğ—¾ô%ËkÿğùÏÓsÏ>KK—.¥POOıÇo~C×^wå|ºØc9–Ÿó°5.$æN&î­Ÿı,=rD$¥ÆØ „éX í` 9çÌKÏ<ı´öí·ß¦öövºıöÛõC†¤q!Ù1A.¿ürzåï§}ûöQAAÁ÷Á|xÿ½÷è²%Kh?àŞuë‚¦Úóøµµµ¸*''‡>ó™ÏÈy˜U(ãŞ{ïš&óæÏ—{_}õUúËŸÿœ´ë¸Œ™³fQEy9=üğÃ29 \Œõb¢üğ? ïÿûr/€û}ôQzœ¥>Ñï~÷;ùL2ÖÆº;:;åZZZıòW¿¢ÿüíoE¨ï›ßü&¥§§Ë½9¹¹¢u¬ÊÄ$É`Ş&§¤ÈyU®±mF íæú¾úÕ¯ÒñãÇEƒ)së±_ÿZÚ©Ûƒçmm,³§»[Æ}TÂ f\ee¥Œ>«:åË—Ó}ÿøŒÓ÷¾û]©ışÁò·Æ±5o¬~c~VVóEõMõ}©©©¡ë×®¥²²2iç?ñ<ÄœWe+mklÛ'©ã>ª÷­M›¤CÀ•W]E¯oÜò^î\nĞïy ¿ÌÄäÃD†i“	×|ğA¹vèĞ!1Ÿ>Üº5è÷ Œ½{ö'.&mII‰t‚ß¢´	“ ÂÂ…åšñÁbr|ê¦›hÏŞ½ÁsøŒsÊdKIN–ß å'OŠ€úbçÏËy®Hƒï0Q;;:èå—_¾€lüû¿Ëüù/~!e®_¿~@™ ®LL/¼ø¢åx‚´˜Pª>@LLî&0&Êˆ”´hH€ç¨Ú†¶¼ñÆ2¹Ğ–ƒxöx>tx^ ~‡Iç‚ñPØÀı3û¸F h3&9Ìj˜Ì‘¶Ï
+õâ÷hG(«Ïü¬BÍÕô×@D%È†ŠáÖ9sæÌÑ#.q€Å‹±Ğ+@ê()Uø:-kŠP˜$ĞB»wï¦Yüu .BI"|Ç$Âwhxñ¯ù7Jz©²`( }VÀyX˜80Ép®œûº!PÔäÂ`…´¿‘èÿ&Ğx?c‚*í¬€2qÏwİ%ßÑv”‰:Q·*SY-+V¬jfó¤U.
+ê‡ ÙÑ^¼á e`‚)ëmÀ³íêì¶eW@»£˜³ Æ“M‘M=c³‹{Œ‡ĞŞÀ~fj,k/€y Ág.ÂÎÂâ3?«póåÏ3eE·pÛ‡‹‹YgÄ¦2üó~4à<4–•i—ššjYNWW—Lf³†‰‚‡ƒÎ‚´x°Ğšyyy¾Ğn[x‚+3<Üƒ6CMP¥!”0PRÖÜ?#’’’øjİlR‚Ø "„HoÔğA! ˜èÏœìíí½ Ìp’ÈÊÌ¼ hÃpøÁµ¤zŠ¸ûë_åUh:£‰}æÌy–áA(€xøÒš°@B³Œ€±‘Ç¿Á¶B(ZYÆq7_Ğ‡üüüã
+R³Îˆ‰‹	jö)ğ ğp!1"õoĞ9åÇ?ş±åu˜×ğ0Y¿qÿı2Ñô‘÷Çìğa~+maD(ÀˆeüÀáÛÊôW„JdõãPş'&“²H„hYYÁ š\Šhñññ?$˜­"šš‚BRi)´;yqÏıßøÆÏ¿A› ¤ (ñL`â=õÔS&Óª«¯úç0¥ia¢C«"ñBC	pbÎàù©6aÜ–\v™¥0×U$Wù»pOÌ–áæ\!Ì-ã˜)!n%àÇÂõC©€E3â¦2L%hIHa#à¼ã¼Ñ0›1Ôš$:‚4ê;´*®£\˜Î ‚
+ÈMJøŠ¤jm9Òª:0P8TŸP´&ôOy$Œ°
+À¡İ˜ˆ˜äš™¶*óÏ?ì+|Ee(`Ü»< lPÚBAJÏ
+3Ù•$WÖ…r%ğ›'NÈço¼Q´®™Ít	çP·{hZ”	aI©Æ+R@8ÀSZE™ŸÄ@ÂŞ¸ÖY\\,å@x†póE¹|ª\£¯®\¾#qÁï¬\™¡Ö	ëÄ¿*à6¢¦’ÕdÃ$ÅC…/dåë„’špÊ!-UTÍ¸†§ÌåÚÚZùŒƒg4Õ”™Šè±Â½†¨r$D€61šœø„Pf<&”òOÍÀÄ­¯«“¨£zÀè—qŒ¬ÊTQå¡Q[DÕ‡¶™ë³"™ …ª_ıÏÏM¹xh›
+ªg’.[şñÖ²…RQQÔ²Ğ¼h‹òYÃšÆ¨½à¯£°´¬4”škæyƒ6_Çmd	*Ô|Qc¢Ê5GxïâqÃ5˜¼¸¶|ydowŠ¤NX.VuF¤AïçAû|¾z…Lc¢B.ÔRÓ¥„Ífƒö‚fªÕ{•54Æ!4q54Æ!´©¬¡1^ÈªMem*khhhâjhhŒ	âbãA$ûQ#¬ØE5ÚíE=c5‘ˆtÓÉÅ*g$Æu´Ÿ¯&n„‹ëjoîH ëkØÔ?^Ú;ZÀÖ^w©Ë©qÍç«‰!°¿v<a<µ·¡¡aL•Mó`¬cT—ƒTR»rC&–›µ ’Œ¯Q‰ô öüB*[%˜#Qç!áUÒ€J\Æv;ì»5&Ğ‡k/46Œ#Û›ÏÍÉî¡ú­€¨lcòy¨qìÏÅG•ÜúUÿ°·Ø˜Ì·‘*Çs‘^ˆ-“Æ„cv‘ù•.CW<+õ|#M‡ÙA”©’Ù±]íÄ\ø3·ß˜©cL 0'µ#ÁEez…{¹ÂE'ëÅZRû’dŸ Ëe°ÄrlÒUr¼zm9ÑD%˜£L”ì '‚J€P{iUVr"‘?®½Š€xh ¤9Ù=’„~£ ÂÄAŸq /Ø›‹Im|± êÇ$2¾Ğ)?ı×•6aR}øá‡2©@•@îC)ÇªİÆ>.*+“zÌ}Ä5$×£_æá¡«ÂP“ç! ”{1ªHÀl5GĞ_ô	åX%µ+!ÉË¢:8¥Ib¹‚J6P-2ÉL‰øÈ€2TV˜z²€Tf´"0Ş´7:DäS¢Éî‘$ô+à^•eƒ_%U«ßBC Ì·Úu¢ßè#²¥NŸ:uAùá^P0”r¬Ú‰®úˆL"Ôƒç¡°råJùW%×«<äá«q ‘&Ï£]*¯÷â;>Ã²RsYO2º»eü!àU’ŒêŸš¯ƒ½\áRá¢ş…¾ÁËÍæòÕ«V‰ÃÀc°Ÿk„
+t¨ÄêÒš
+R¶ á‘ºqKn”‡ïx ³ÉÿT•ìIB¿ñ^«W”€<Æ¤jUî7Q8„{AÁPÊ1d2[9H§C}*ßx¸/©‹ä%CI7¿¼ß•ÿâã32›ŒãoÎ¯Uå¨<çp/W˜Äjb9¤1y±F‰® ~-Ô{‹ğ{$nCª*é÷*5'Ö
+á’¥­îE ÓgÌ¾gËHBõ¹¡ Ô
+¬L÷H2ÍÁ+ä1GBº‘r·"M7'£ã{vvvĞÿ…™!tóÍ7Ó¯~ùËàø›óÉU9Ãy¹BÔ˜Êêu+0k‡“XÓR™+fS
+øÏúSprâ!áíÊôÆËĞàw©×Ş¨7ON›6mĞö†¡$ô+Ÿ]­ebÁ6$UCû«¤j”ö™µœ0)Õ$ì‘–cÕn¸2ªO_höPïôŠdDŠ¡&Ï“ÓU;ñ²vÖìÙbãû†‚¿Qã¦b
+Æ¤ö¡¾\!ª4.‚ğá`n@35±mü×s‚9ê‚y¥&ÈUTT$ßaCÃÜŞ°>Ú ÉÒæ{á_+³K%é[%ˆ£ÁáPx“ÆZ!Ô
+†ZQˆšûˆ±A=Æ÷tgD‚¡&ÏƒdğÉq/êB@e  	Q½d=ËíWoÉD
+‡1©}°—+¨hôP^‰;.–ƒ44.”9<7t"½†Æ´&ˆª–˜”©m|éßX„S?:‰¸LØè£\õî°PKNcFûjSYCc|@›Êãš¸š¸Q¯‹Èİ£ÇACw\¡§™¼‡ô8hhâ'ø\íä«İM¾ş.=š¸ãÇTv“¯³Š|Í'ôXhhâëî%_[%Q_‹MÜñÁZQWùÚÏ-![‡†&î¸àmwyÊ_á‹![ö|= š¸ãÂ½=³™¼å/‘=ù7œihhâmÒÖî&÷Gˆb’ÈQz§MÜ1o"7~D-ÿƒ|-äXø-6“èAÑĞÄëæqÿ÷±ÆİIÎÅß&gÙ7xÄ.L¨òõ4yúõ€i\4è´¾P¤=ü;êßñsòÖ#ç‚/’ãòÅMúøwy+6¯¯•ì“Wòµ=hš¸—=Mä>ğ4yöşš¨»œK¾FÎå?"[b®_»vÖ·üïäk=I”Å¤]E¶äKM¬¡¡‰{1üÙº}äŞ÷¬mÿ@>ò’sÅOÈQö€Ÿ˜Ş~òy¼GŸçQK&{ñçÉ9Ù2JôÀihâ^2Ó¸ñ0y¶ıoò™ì“¦’séwÉ>ÙØ<öµW²ş÷dË]ÄşîdŸv£4MÜKªië{ëƒäcØ>…«şsüoõó5"÷‡’çôëä˜ıä\õ3²¥NÕƒ¦¡‰{	)Ë~l£ÓWñ
+Q\*9–ı¥_ñ_í¨&7´ğ‘—È±è.r®y\4°†Æ¥ÆÄ^òºÉ[ı!y+ß"ŠM!ûÜ»É1ÿ>"›C.{N¼È›Îùóe9H“VCw,Àãb3 Ë&»¢œeßä_ÇÕA¾ÚD}n²eÍ#Òæ±†&îØ1•}ä‘Ã–%¦rP·W‘¯§Ş¿-ÙİG¤“ç54qÇJïcÉ–9×?¶À¡àˆ‘ëä°‘¯íùöëÙ¢¡‰;6zï${æ|¿¶uµñÑıñ%6m)E¬…ÈËÄõœ|™¨·YÏMÜKÖ°¶ôÙä\ş¿ÈÛq^ö$“§/ qcÉ»„ì‰™dóy%€åŞú[×^=k4.9ô:®#¾Nsï“g÷ÿ%û”«É–êÿË~öikÉ{jy+Ö“ÍÃäİÄš÷¯ä(şâˆ6áäùFÚ¸ë8µvöP¬ÓN7,-¡ËfM×ÃÚãrÓ‡NÓ‡G+)).ÆZnòÑÙë¢%Å…tıâY´·¼š^İ~„Ò’x¼‰Ö.™Me3¬Ç¡®¥“ŞÜsœœ­£ìIÉ´záL*ÌJ£Ş;H…Ùiäñúhiñú¨²†fågÓ´ütŠq84q£K|ÅSÌu¿¦ş¿ÜÛşœ+ÿÙ’rÙT.$Çåÿ,ïšòV¾)KF¾Æ£DÅ#[}SGí8v†j›;(!6†N/ š5¾‡´ßí¦ŠÚFz÷@1¼L$W¿g q™œMíİòá†%%”KÇYˆµw÷È8´u÷ÑÜ¢<fnÏÉ*ZÏ$¯nn§+æLc²NbAà#;—™›BO×Ğ_ŞİOçÚhÒêD!®6•£ÑjNÊ£˜ëŸ _ÓòU½K²9ƒMi{Ş2ÖÈ÷±.$Ÿ«åcSz$ë–ÿ#ÂMz}ã<ƒ½ò¿®Ëé°S:kÒô”š”üñ‘‘š($õz½4« “V/š!Z8~®jšÚä÷F4wtÓÎãUTÃ¤MŒ‹¥Ùü»L. +-™ëI¤éy™,â(-)â„øÑõÖ­q“-g‘h[ïÙ·ˆj¦J6cØ³0±È×İ@ö‚#_/O8‡İ.“ÛÁ¾G…Và~86òú¼T:9—îX½˜ØlöV¿ÇK“˜\Ğªv»“Ö”Í¢GÏ
+9}ln¿¾û8}ãÓ+ïƒ*™Ô\.ÑÔÜI´´¤PêJKŒ§kÍÍŸ™Â–Kõõ»…ÈN»&nTÀËb¼½«W¤9L9{€,ö¢kıKAılÂõ²†O÷G“Ùœv,¸—ì…×X–×ëê§Ššf:]×,ÚcNQ.k‚¬	/1¾ë”„8š?-ŸSxMcM	³ùÙ7vŠF~k_9]Ãd,œ-Ï¨ŸÙöcgÙÇí`ß9––±<§(G~ÃäÏJK
+–…:up*
+€‡~º¦‰êÛºd2A2OÉJcs*Îïp)MÄøF!°ÏÕIŞ¶Óä(ZCöù÷°Ÿ›jY64DWOŸöĞéZzcÏ	ZQ:•n¹|LÀ‘@—ßÁ~_Kgu÷¹ÄoŒ‹qR›Ÿ“¹ĞÚ
+}ìO¶wC0ùDƒÃMNˆµ,·‹MSy,§b|_—å·åpÜ¿Ş>êsyd¬ İ@’¬ÔÄˆÚ`Q·PmPHàú—•L¡Ş?@ÖÔ]İ.zåÃ£ôO·N’çµ¯ü<­oáöºiEI¾hXômÂ…e¢½ƒÕM´¯¢šjÙ'Êfhz^Kg;ûEI”;)…M4W?Á¯-mŞVräÏ!šu=“6w@¹ .ğ¯ÙŸ*eÉ?z>Í`­ñü[{ùØÃÄñŠ‰ã^D“ıèÙz:xªšÎ5¶Q[g/52‰z].1“˜dY)‰"€®aÿpŞÔ\ÖLvjíê¡ÛĞ1şmJbd¦Ò×nX&æ¸›ö ='Î‘Ëí¦ËfO¡/®ZD,$Ş?tZüÌfÔÙÖÉ‚£—ïñŠ€Èæ±Côw)ß¿4•‰<R€úkİ—><D©	ñÜ
+úôòÊÏH¡wVˆ¶Íà>_ÍõÎÊŸ˜VMÔï?7îb“ë¤h¾;V—Qñ”,&Z¬P µ:{\Ê°ÿç 9AN—ÛC=éÔSg£Ş*êe¢ööõ³–ê#7_Ÿš›!~šÂüiy´îSËé§ÿµ‘ŞÜs’V-˜IÓs‡Õ„†}uÇQzñ½"hàÆÄ8Øg³“Çã£ó­tÜgãÏ, j›è[7_!f%2ˆØ¾¶û(e¦@3&‰	Z”30Q¢ŸûŸò­}'¤?)L@;k[,·ü–ÍÕÊÚfî["kv®“…q/ûçZY{i÷‰³<&nº™-‹Ä¸˜Ap‘&î­WÌ¥ÇÏÊ„´ññªz±$V³¦…™l³Û4q£0í`J®(-’ÙSÁ¦òsoìMÍ¿	V2(kóâÊlfz¼vêc-ãv÷Éwh³øX‡Y
+2Óh2ÑÂTKNŒ¥œIÉTÓÜÁZ²kÃj?L×’)ÙtÃÒbYïLf#íîc¨®§]ÇÏ‰ößW^ÍD:G³Ø·†Z5m=rZÌTtídu£ÙÄ0×ëZ;%€ƒèkB\÷'#Po]9gªN)\¯“…,ˆ6&Î{O³ĞhãßwĞk;Hdwq˜µgŒmlLäVÇdÛ/¬ZHÿoãJaWfëáJ¦ĞÈ×,œÁÿ¦NØØAÔ“	G=OĞÊºf:SßÊf_õ°Oß“šÚÕápƒ'êc™œqN'ûUÊ/—–C9éÉbZgFà×Á—†i‹I3u¸€™{ÛUóè¶+ç[NüOùJèy›¶«"/›·pº¹_ğS§0Ig²Ù¾ŸÍì&æ)vÖ”Í ÿĞÆV&"4ovzåeø_z‡¿óÙ«¸Në)-ş,@X. 9—Š¸2ğÏŸ­¥¤ØX‰/øıg/ÿ>†òÓSEøİ¿¶ûÎStª¶Q„‹D¡YˆŞvU)­š7C„¨&n”ÚÇò’¢Q¯¦Ü›»³pè§ëØC½ÃÌùXgèÇR,œQ@‡*ë¨}¿n®³[‚@q¢uğµ½ìß£¤Ãgê$¨c4iaò‚èLå²€‚ 8åó¼ËÙ‚Ù¸ëÕ¶´“Ïkc_ßZÓrû+XÛÿì¿7“ZÂùf6åÌÈ§o~f•æ\896š?=—…Bƒøæıhße%…"Ğ&2&ÜrPk‡­‡Ï°†õĞçV..…ƒò{¡•¡™`2CC8,‚ZˆÀşá­½´»ü<k†ùlâ–JÀ–‚/ ¹\C[ÔÒÚª|Å…LD€ñDc­£²™“ƒQãª†6‰(Û™$E9é45;ÍzÄmğ¿ZŸøÛş¾°kÏ¸„ßºXhøÄ…ï
+sßbû7âçÛEèàw±l	Áç‡O>#7“R“â4q'0éŞŞ’{ùZµ`³ï˜Á&4|Ióäƒ?‡=·=.jaíPİÜÆf[³øY·^1O"šà.æ"‚Cí]}ôì›;iÏ‰*Zwãrú×>B›)dË kÅªêÛ$²Š(/rV5°î–}Îfd³YŸ‘šÀš±SÈ‡åD¾v‡ŒG[w¹\öÓc©ˆMë$ÃÚ'È‚å l’€6?ÏşzS{'õöº©‹É9†5!‚Z¡…O"Ñ“Ù]XVZHq§‰Š¯Á2ÈÍH¦ìI‰ÏÊG'Î5p{«dí×+ËZv©ï¶fJ³éj~†Ñ²YE7 •æNÍ£Õ‹fÑŠóô?Ÿ^/QÔT¬	q±9UJsË"½½ÔÅä…Ç¾/ü\sòØçÅ2îÙväŒL4,Ë|ùšE)À<xºš^ŞúoB@¨‹º¹=^ĞÂë“¶c}4ş¨i{`\LfMb_¶•?Ç±Ù|¾°jÅ%'Š¯ÀY—ËEÅ“shZ^Æ€ß"*½aÇa:pªFQXïc!»2±–‹O,ğ<}®°æŠ›­›¾¼j‘øÄ‘ ©£[|hY~b²"*á£Ú…3ò3Gtœ5qÇ0æ1qrûuTÁšópe-eS±¾µCLÜîÎ>!+´$ÌÏ&iÎ¤$*NÎ¦üÌd*ÌL§)lJb"¨âdÓål}«hµ»×.‘İ<\¢@{6³•ğÌ«;‚›.U5gª¬ß¢¾òšFÙœ3ŞŒÔÄXZÀöƒÃ§%ğvû[^ÓLKg'²ïØHÍ=Ôßï¥LZ<èR´uJ¨A1ø©s§æH°‚Ú÷ñs¢ù}¾Áüt¿µãp6b[ö—Ó‘³õl	8)Ò7_IcÁµıè0ùOV7iâN Z	sp!OæÓò…ĞhjİV¢—Ø7l÷›e~ÿÑ&Rçğï@ó×ÆÚÊ¿	`¸›,Âá#.dŸZ›a¾zşÖv	Ò´æEm‹Ül9Æ³	?¿E?D:pªZ6N  …@|Õ)Y©”0YaÂ¾½¿‚¶,—İJp)î^³Ä¿q{©íX7ö°ÉŞÊ>r+´µŠ%´õ;ˆqçU—ÉVÈÛW—ÉªÀ™ºf±¶p¿±5É;a÷*7¶wÑ¡Ó5²oû„™#£AXå‚Ul¦bƒøÙ+æ_°ÑÁ)y¦>Ë^€TØ–8›…Ë>6“Aô¦¶njîì–å!,‰!B;™µ­
+¶Õ4µÓ6Ölp2SbhõÂR·Q`õõN2'–¯Îs¿áÆå¥ÓKŠe§6¬œ7UŒ0¿TTÓÖ#•tû5eš¸XÓ}jÃ6:XYC-l*BbcÏo›`X»•ùÈ‡›'nO¿˜n¸¯…';4İ¢™²ÄãåÀHÀÇF Ë!Øògµ;	ëÏğ%}!lV¤·AÃî>yNv]ÁW}÷à)ªgsËG——äğo±æZßÖ!Q\9ÛBM}…6ìW!û¦ÌÁ‡}×1y(ÿ–åseÌU$z%[9#–vlm;ZI‹gP‰År’&n´ušI ó°’ÍË§_ÛNi¬q°Ñ ~&ªš£ğ'ûa>»Ee¸·Ÿâù%ÅSèkË$htágLb´¦©Øp±ƒµ#„ú`Å]{3˜ ½, Å!¼ Ğßì/ÍM_à=6Ú]mkÇeb3Ú3’ş<òpßcrò|¥²…MWÌ6ÀGŒ¡lVôYgëZiß©š‰M\ŸÏuDê¢XNÀ¦lLe¢Â_‚–ÙËZèl]‹Lâ¾ş.YäÇ0`$d•Ó!$G@¦8?“fdQia®øŒ#5^R”å?¼5Zä"ÿdä ş~Ón&ád>g¸İoî>A­•åø|¾Ú––Ä>j:­ªç¾ö²Æò‰@š;‰æ² ‚)ª~“š+»Å°9ƒ¼ñôîS”‘œ(Ù@§Cl©lØqTöxcM‚b¦:}ş€t~âY·Ëì6{‡}kñ£ùû•s§JäÚøœ_S6›>b7çğ™ZXGøsãâYLôÄ‰IÜh$ò®ç$ˆ)=Ó€i-357]•ó§Q}K'õñäCàFWY|?´06×ƒxƒ¶/:ywQG·‹ÎÔ7ËDÏKÊßÍõOt•³
+Ópö”l*åãhUuÅÆÒoÙËfn…Là³­ÒìÃ>UÓ,û°±¾êµ 4caN:½¸R¢å(¯†ùüª…,Àî£ÎËH¥ëÏ¦cçê©¾½‹Ú˜è 1H„¬£slÎb’+ øğ&Š^ÓÎ)øçİ½nILè‘İY>
+MZ„>:ÍÚó¼W‰VÀşp¼®ækfD¿w8Kë·–ì'MÜqŠÎŞ>ñ6í>Î“¸ŸÖ^V,;…²	ÖF`igrfÚˆÔ¨-²Y°Ñ›ï¯š7(‚Üw`š6Öá°oÉø÷Ş¸Œ^ùğ°¬¥bCHMK‡øœ³²é¦å¥òb¹Ş=([c-R÷ÇÖÈıåçÅŠ­Îì¿jŞ4yı‹¨y®xÖûNË§NvÚ™\HrX»¤”î^s™¬m÷‰ûà LÓøÂ¼ÇRÚ¶N°öv…‹	`“e%“³ååo¨¹a„¶\¬n ãUb™Ô¶{†ËPÒÄÃ@îíë·Ê]^R(¯M©æ	‰-€0—±.9ÜM0Û°ìÒëòïêd­…@	&‚>²fÉu‚$SYÃa¹	éwáöÖÂÜƒ–ì“ÜŞ$1K`¦_É~6À4tõ{Å ù)VK!Hƒ[1§Hò­rc¡™Ï, ÔÏ^%ñg1vYâ±Æê®ë–Ğ¢iÔÀZ×¿ÛÉÆíK 9SóäÍƒ»®_*»¹
+Mé‚È`ºzÁtYJ‰Sd3H(`|nZV*ok„¯nN?4VÔ×]&nM\»ì^›(À<Ãø<>fy<ã½CH:ÇÛıjYCûLXVÀ&De³X E-9>NÌß	Jù#¤X³Utö*_‘'¸?­¯_ˆÕT!ò
+âöº<}‘²Ó©dJ]ÎÂš/üÉ&ôxqê…¸½İz˜ÎÕ·Ğ—®YD÷\¿„Ò'¿¦ÇMüO9b’Q§qñş¡ß~UÖµÈZ`uK;û`âkÁÄDÛ@_Œ‚ÛeÓæ÷me³>òoÕu8äœMvTÒşXkg²7£0“f²yWÄ  y±'Î5Jú	6åŠÙœU©rV€`Á!Ñ`n–±VÔ¤Õ˜Á)¬"ùÇ _o³è÷ïµE$Ô¯1İ²èÓQşl€WÛü@Æ„øñ%Âìdâ;"Zl®í:QEGÎÔË6B,¡OÎ¤—”HÄ6ş·¿¢š:º{$[iŞ´<=+5†FÜh\2ÂŸğİ(A¤6•“b%ƒh)|$‡ÍX
+ò/Ïx|şMÂ4 §×%@ĞŞÍ¬Y±ƒ§U^ÜÖ/ûi§°O{Ãe³iiq‘f"ÓVö‘a¦#Ğ´vñl‰¦FûsĞa×ívoŒö#êŒå$@[ÊşdÖœı¢==BBššM´ª[òo½òÚhÛXö‹ñvŒÿ[±+É¿Æ™8ì-€È/Eâ ^Å2QÓÔ4"Ğ²Ngôú¸ƒA©äü¸W}x¼Ê»ş6–—‘æ«†6•G>«>Y‰zè5† ı·ƒ44´ÆÕĞĞĞWCCCk\­q544´ÆÕĞĞĞWCCk\M\m*khh«GDCcÜW‡†Æø#®Şé®¡¡MåK
+üm›ºº:êêê¢şş~ı¤'bbb())‰rssıåA›Êã.—‹NUTÈßŒÕ˜x€Ğîíí¥¶¶6š1s&ÅÆÆF7q£ÅT®>^œÆÄ7æÂ´iÓ´©<ĞÔÔ$RWCsaêÔ©š¸ãZÛj( ¾Ëœ&7::WC#Úæuêëëy-33“JKK©  @¾#€qèĞ!ª©©‘k, óì<y’ÊÊÊhÒ¤IôÎ;ï„­/ÒûTİˆzÖ××Ó‘#G†İGÕV3TÛG³gÏ¦É“'ËxÁu.RD:nÀÜ¹s‡=^Ñ¸Ê•¦r(›ššJ«V­’ÏÇ—gÌ˜A+W®Nììlª­­•2ğç-åo¢ÁÓÒÒäwƒİW\\,u÷ôô|"Ë .ub¹‡2£eq`iu¢nU‡Õ¹Hé¸]sÍ54eÊÚ¿ÿ0‰ëÓÄ/~M(©m÷Úk¯‰Æ***èÓŸş´HşÆÆF9‡ÀÊ€6ÁTy˜<%%%²¼ }ôèQÑîjÜp_\\Í™ãÿóÆ‰†ß¦§ûÿtÊ¬ªª’ûgÎœ)QOU¦úîÏÊÊ¢êêjZ²dÉ€kŠ  ´«yBƒÓ§O—ßB+ƒï¿ÿş€öŸ9sf€ÃØ ˆƒ{!XÎ;wÁø©€êVcb<—˜˜¬õ$''Ó‰'dŒZ6??_úc7c Õ_ã¸Í›7NŸ>-Ï%’öF3qíØQpàaZ………ÔÜÜ,YÃçgy†vîÜœ„Ğ´¸VTT$Ÿ1Ù®¿şzYØohhóK—.•kjb@ëÜxã2©@cİø]Là¯ÕåååÉ½ ,, Ôg.3##C¾£Nl$PmR‡j+ÊEÛÔk ú-úŒ{0ùñmhoo§åË—ÓÂ…å~ü‹ï8ë¸O•e<¼^o¬VçŒõB8¡,ôO•…zpÁC´ıRÆBµ×qÈo5n‘¶WÑ2¯£>8jã44d¨ëFââEH|†&^ıujmm©	f¼ïê«¯ÂA£Ã×4bß¾}291Áşö·¿É¹5kÖPgg'½úê«ÁöÍŸ?Ÿ<$´ÊÕVø˜8xâ‰à5LÚçŸ^Ú‰É ,|G;aºoß¾]ş…ºiÓ&Š§uëÖIšR‹ª[¡ñœBee%½÷Ş{bÅ|å+_	–…¾û{Ï=÷ˆVFYĞşªhÚm
+RB Z[$í@Á©èè ÌĞPA+Hlóõœœ1árò½ğ&0€ Œ¹uŸZè‡é¦Lq+ß[ı“šY}Ù1iA´øàƒ,û£ÚzàÀ`›TÙêÚ®]»‚*Õ~LróX¡8xààyÜo®W¹  ˜ºf<gáººG•¥ÜuäC½øâ0óUpÑê9¨q‹¤½ÚÇgèîî¶<êÔ)™h•——Ë9˜]÷İwmİº•;Ô°(Ci|Ve"ƒ	…I†sÛ¶mŞ Óğ¶Ûn£G}ô‚úåĞ.˜pê»Úš×ÒÒ4#1‰­ú£&7juMõÃXçOúÓ PP@;`E<òÈ#Y2N§3X:gŒä£¸’’2`üÌıUÂß1n íã?.&7‰ÕsJ{5qÇÔƒ6ãÍ7ßÉşõ¯vïŞ-çàSøÊª|F¤ÿÜç>'Ÿo½õV	”€ğ
+¯¼òŠü»víZ	
+A†kêDDûæ›o–À‚P(åcÙH=«şŸ•ùºÕ5sûñ/Ù“O>I‡–ºÑÕ~!Õ˜³¸¶zõê` ˆ„@Ò¢E‹äÊ:{ö¬Xªn´Ã\|VÕFUrªsßV¬X!ãi{'q)ª‰‹	ôÔSOÑ7Ü „QÑË6È5D¬È‚Ï }BB‚ø±Š`O?ıô÷½üòË´lÙ2úÂ¾ ~m¸öıéO
+N~øj Æïÿûy0âZ]·ºfn?ús¸şâ‹/	 ºyóæÊÅÁtÇØİqÇAí¿ßØf„›nºI|\Üz Ôßõ@c¢òÔøÂB¹ø®Ïš5K®Áª‹k°d"mo´Ík#ü™Íêšš¨ø3›?ôiŒ`ƒT \ez/^¼˜î¿ÿ~zã7è¥—^3í}0JæCA~¾õŸÙŒ–è[(É«12@D}Ï=C².%tTyœ@g]`éjãÆâFŒ¥gõ>n´8ˆjê¡‹ãĞXš¤ƒSãXOEäQC{Ñ£?É J|ë×®•]4¡Ös5&°Œ¹ }Üq‚ìœlúî÷¾Kë_Y/ÛïÌ4¢ˆzÃêºåÖ[(5-Mû¸ã	Øöwç]wêY<Ñ¥¯Ö/D×ĞGbÈL\ŸßRÖÔÕĞäµ+Ò’ì[Ğ44Æ"É^ÅWgàVËİÍÍÍ}™™™qz˜44ÆZ[[‘~ÕàªÏø€½å'Ëõâ§†ÆD€›Aò"É ïIã£€±à•õëÿ+=#İ©‡JCcl ¥¹Å}ë-·|­ººoL¨æ£Éğu¶sçÏ×\¾|ù•‰‰‰ú^kh\b456º|ğ¡Ÿïİ»9¢x­
+6%¸lââÕHïËæ£(++«ôÁ‡| ´´túÌ™3cõğih\\TVVº>|úá‡~¢±±¯f9ËGŠ¸ 4o\€¼Y0›ù˜ÌG›Ïsrss§ø|>=¤£›ÍæÃQWWwÍâ£|ª–óó¸1@Zø¹åË"Ìì
+\@”±glômáBJJJ®ŠOŒ†Áq»İŞŞŞ~ó€uww»øšŸÕy,l³ûĞ¦8___Ÿ»§§G½ÑÛ®Ş¶¶¶ŞÁîû¤ÏÿËÌÌLîïcccì&Åª²"œpØfxÁüP‚>)))ÎápX
+ş¸¸8gLLŒ©Às³ûàÁƒ[DUG]zÉôp”¯‹`Ub@û"h•Æ!wÍš5+’Œ/eRy™@Á|¼şş~7ïSİår¹;;;{Í¤kiiéá{=Bø<¥V§q¯‡øLç}!Ê ÎS˜:G¸m¦s‘şŞ6Œ{ms‰BœÕ¾~ÃÊÂ™ª,¾–dÃ°,HâMÁÆÂÃóæûYPÅ9ÎKş°»›7oŞŞÔÔT‡ Tàè(Ñ~úx×ò!¼Î€ßƒ¬),S¯½öÚ’É“'çeddLR7···w©-WC®´Ki-œçïAò0™<µµµ"zÙ–ï0‘ÄgA«sŞAˆfE”¡œ£„EJŠ¼‹¸Ã!íPkóİF˜Ğ ×"¶A‚-Œ±…û[öéÓ§'›Hn›4iRë¯syYYYÉfKƒO,î5ŠÔÔT8ê{+£ªªªvË–-ÇÙ‚k º„u,`o¸76^i_ø¾ñ|$¸Ày‡…Æ	E0_á:ƒ€ƒ‘q(¤ì;EX×h7ÜçOBÆHI?Ø5[„÷ØÂÜo‚ÀŒ¬ƒ³E ìÔg._m~êø®=£—>^³õZYt¶AÌ ‡AûªC‘Önj€YFL&9#%Ù`&®/B’F´¡Ü;š¤I?	Y#Q ‘Ì3)‡"¨lÃ4ßm‚Hïµ‡é¯Ç@^—ápÎ[ºa¶|»ÀÎÀg‡Åo?©‰©&)ÒùF€XÃ!áX$îh•cû„å”@°AH…3¿‡#k¯Ï@^·°Şp±›Ê2˜ÜVP¶>“…Æ„h#iŠ§qiĞ'½o´Èé½>I½®å…š9;q)Â ÁÅÔrcAhØ†q=”Æ4$îÿ` ¶ÚP­=†L    IEND®B`‚                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         .jnlp}"/>
+        </exec>
+    </target>
+    
+    <target name="-profile-check-1">
+        <property name="run.jvmargs.ide" value=""/>        
+        <condition property="profiler.configured">
+            <or>
+                <contains casesensitive="true" string="${run.jvmargs.ide}" substring="-agentpath:"/>
+                <contains casesensitive="true" string="${run.jvmargs.ide}" substring="-javaagent:"/>
+            </or>
+        </condition>
+    </target>
+    
+    <target if="jnlp-file-exists+netbeans.home" name="-profile-check-jnlp">
+        <antcall target="-profile-check-1"/>
+    </target>
+    
+    <target name="-do-jfxws-profile" depends="-mark-project-state-profiling,-mark-project-needs-jnlp,
+            -check-jdk-7u4or5-mac,jar,-check-jfx-webstart,-resolve-jnlp-file,-check-jfx-runtime,-warn-insufficient-signing">
+        <echo message="Executing ${jfx.deployment.jnlp} in profile mode using ${active.webstart.executable}"/>
+        <property name="run.jvmargs.ide" value=""/>        
+        <exec executable="${active.webstart.executable}">
+            <env key="JAVAWS_VM_ARGS" value="${run.jvmargs.ide}"/>
+            <arg value="-wait"/>
+            <arg file="${jfx.deployment.jnlp}"/>
+        </exec>
+    </target>
+    
+    <target name="jfxws-profile" if="profiler.configured" 
+        depends="-profile-check-1"
+        description="Profile JavaFX javaws project in IDE">
+        <startprofiler/>
+        <antcall target="-do-jfxws-profile"/>
+    </target>
+    
+    <target name="jfxws-run-noscript" depends="-set-fallback-no-javascript, jfxws-run"/>
+
+    <target name="jfxws-debug-noscript" depends="-set-fallback-no-javascript, jfxws-debug"/>
+
+    <target name="jfxws-profile-noscript" depends="-set-fallback-no-javascript, jfxws-profile"/>
+
+
+    <!-- Running/Debugging/Profiling in Browser -->
+
+    <target name="-check-selected-browser-path" depends="-check-default-run-config">
+        <condition property="javafx.run.inbrowser.undefined">
+            <or>
+                <and>
+                    <isset property="javafx.run.inbrowser"/>
+                    <equals arg1="${javafx.run.inbrowser}" arg2="undefined"/>
+                </and>
+                <and>
+                    <isset property="javafx.run.inbrowser.path"/>
+                    <equals arg1="${javafx.run.inbrowser.path}" arg2="undefined"/>
+                </and>
+            </or>
+        </condition>
+        <condition property="javafx.run.inbrowser.path-exists">
+            <and>
+                <isset property="javafx.run.inbrowser.path"/>
+                <available file="${javafx.run.inbrowser.path}"/>
+            </and>
+        </condition>
+        <fail message="Error:${line.separator}Browser selection not recognizable from ${config} run configuration.${line.separator}Please go to Project Properties dialog, category Run, to select a valid browser." unless="javafx.run.inbrowser.path"/>
+        <fail message="Error:${line.separator}No browser defined in ${config} run configuration.${line.separator}Please verify in Tools->Options dialog that NetBeans recognizes a valid browser, then go to Project Properties dialog, category Run, to select a valid browser." if="javafx.run.inbrowser.undefined"/>
+        <fail message="Error:${line.separator}Browser ${javafx.run.inbrowser.path} referred from ${config} run configuration can not be found.${line.separator}(This can happen, e.g, when the JavaFX Project is transferred to another system.)${line.separator}Please go to Project Properties dialog, category Run, to select a valid browser." unless="javafx.run.inbrowser.path-exists"/>
+    </target>
+
+    <target name="-substitute-template-processed-html-file" depends="-check-project" if="html-template-available">
+        <deploy-process-template/>
+    </target>
+    <target name="-check-template-processed-html-file" depends="-substitute-template-processed-html-file">
+        <condition property="html-file-exists">
+            <and>
+                <isset property="html-template-available"/>
+                <available file="${javafx.run.htmltemplate.processed}"/>
+            </and>
+        </condition>
+    </target>
+    
+    <target name="-set-template-processed-html-file" depends="-check-template-processed-html-file" if="html-file-exists">
+        <property name="jfx.deployment.html" location="${javafx.run.htmltemplate.processed}"/>
+    </target>
+    
+    <target name="-set-html-file" depends="-set-template-processed-html-file" unless="html-file-exists">
+        <basename property="jfx.deployment.base" file="${jfx.deployment.jar}" suffix=".jar"/>
+        <property name="jfx.deployment.html" location="${jfx.deployment.dir}${file.separator}${jfx.deployment.base}.html"/>
+        <condition property="html-file-exists">
+            <available file="${jfx.deployment.html}"/>
+        </condition>
+        <condition property="html-file-exists+netbeans.home">
+            <and>
+                <isset property="html-file-exists"/>
+                <isset property="netbeans.home"/>
+            </and>
+        </condition>
+    </target>
+
+    <!-- set property javafx.enable.concurrent.external.runs=true to enable multiple runs of the same WebStart or Run-in-Browser project -->
+    <target name="-check-concurrent-html-runs" depends="-set-html-file">
+        <condition property="disable-concurrent-runs">
+            <or>
+                <not>
+                    <and>
+                        <isset property="javafx.enable.concurrent.external.runs"/>
+                        <equals arg1="${javafx.enable.concurrent.external.runs}" arg2="true" trim="true"/>
+                    </and>
+                </not>
+                <and>
+                    <isset property="html-template-available"/>
+                    <available file="${javafx.run.htmltemplate.processed}"/>
+                </and>
+            </or>
+        </condition>
+        <condition property="temp.run.html" value="${jfx.deployment.html}">
+            <isset property="disable-concurrent-runs"/>
+        </condition>
+    </target>
+    <target name="-warn-concurrent-html-runs" unless="disable-concurrent-runs">
+        <echo message="Note: Concurrent Run in Browser enabled.${line.separator}Temporary directory ${temp.run.dir}${line.separator}will remain unused when execution in browser has finished. Use project Clean to delete unused directories."/>
+    </target>
+
+    <target name="jfxbe-run" if="html-file-exists" depends="-mark-project-state-running,-clean-if-config-changed,-mark-project-needs-jnlp,-check-jdk-7u4or5-mac,jar,
+            -check-selected-browser-path,-set-html-file,-check-jfx-runtime,-check-concurrent-html-runs,-create-temp-run-dir,-warn-insufficient-signing"
+            description="Start JavaFX execution in browser">
+        <echo message="Executing ${temp.run.html} using ${javafx.run.inbrowser}"/>
+        <echo message="(${javafx.run.inbrowser.path})"/>
+        <property name="javafx.run.inbrowser.arguments" value=""/>
+        <exec executable="${javafx.run.inbrowser.path}">
+            <arg line="${javafx.run.inbrowser.arguments}"/>
+            <arg file="${temp.run.html}"/>
+        </exec>
+        <antcall target="-warn-concurrent-html-runs"/>
+    </target>
+    
+    <target name="jfxbe-debug" if="html-file-exists+netbeans.home" depends="-mark-project-state-debugging-in-browser,-init-debug-args,
+            clean,-debug-start-debugger,-mark-project-needs-jnlp,-check-jdk-7u4or5-mac,jar,
+            -check-selected-browser-path,-set-html-file,-check-jfx-runtime,-warn-insufficient-signing,
+            -debug-jfxbe-debuggee" description="Debug JavaFX project in browser">
+        <!-- after the session clean up the jnlp containing debug settings -->
+        <antcall target="clean"/>
+    </target>
+        
+    <target name="-debug-jfxbe-debuggee" depends="-init-debug-args">
+        <echo message="Executing ${jfx.deployment.html} in debug mode using ${javafx.run.inbrowser}"/>
+        <echo message="(${javafx.run.inbrowser.path})"/>
+        <property name="javafx.run.inbrowser.arguments" value=""/>
+        <exec executable="${javafx.run.inbrowser.path}">
+            <arg line="${javafx.run.inbrowser.arguments}"/>
+            <env key="_JPI_VM_OPTIONS" value="-agentlib:jdwp=transport=${debug-transport},address=${jpda.address}"/>
+            <arg file="${jfx.deployment.html}"/>
+        </exec>
+    </target>
+
+    <target if="html-file-exists+netbeans.home" name="-profile-check-html">
+        <antcall target="-profile-check-1"/>
+    </target>
+
+    <target name="-do-jfxbe-profile" depends="-mark-project-state-profiling,-mark-project-needs-jnlp,
+            -check-jdk-7u4or5-mac,jar,-check-selected-browser-path,-set-html-file,-check-jfx-runtime,-warn-insufficient-signing">
+        <echo message="Executing ${jfx.deployment.html} in profile mode using ${javafx.run.inbrowser}"/>
+        <echo message="(${javafx.run.inbrowser.path})"/>
+        <property name="run.jvmargs.ide" value=""/>
+        <property name="javafx.run.inbrowser.arguments" value=""/>
+        <exec executable="${javafx.run.inbrowser.path}">
+            <arg line="${javafx.run.inbrowser.arguments}"/>
+            <env key="_JPI_VM_OPTIONS" value="${run.jvmargs.ide}"/>
+            <arg file="${jfx.deployment.html}"/>
+        </exec>
+    </target>
+
+    <target name="jfxbe-profile" if="profiler.configured"
+        depends="-profile-check-html"
+        description="Profile JavaFX project in browser">
+        <startprofiler/>
+        <antcall target="-do-jfxbe-profile"/>
+    </target>
+
+    <target name="jfxbe-run-noscript" depends="-set-fallback-no-javascript, jfxbe-run"/>
+
+    <target name="jfxbe-debug-noscript" depends="-set-fallback-no-javascript, jfxbe-debug"/>
+
+    <target name="jfxbe-profile-noscript" depends="-set-fallback-no-javascript, jfxbe-profile"/>
+
+
+</project>
